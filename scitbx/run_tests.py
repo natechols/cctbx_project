@@ -94,6 +94,7 @@ tst_list = [
   "$D/minpack/tst.py",
   ["$D/lbfgs/tst_ext.py"],
   "$D/lbfgs/tst_curvatures.py",
+  "$D/lbfgs/tst_curvature_preconditioner.py",
   "$D/lbfgs/tst_lbfgs_fem.py",
   "$D/lbfgs/tst_func_free_line_search.py",
   "$B/lbfgs/tst_lbfgs",

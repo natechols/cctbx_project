@@ -17,6 +17,12 @@ of the 2nd derivative matrix) into that diagonal:
 scitbx.lbfgs.run() requests the diagonal at the start of each iteration
 at the point just accepted by the line search, i.e. the point of the
 previous evaluation. That evaluation is reused.
+
+In the first iteration, scitbx.lbfgs uses the step length 1/|g| along
+-D*g (appropriate for D = 1). The first diagonal is therefore multiplied
+by |g|, so that the first step is the preconditioned Newton step -D*g
+(otherwise it is too long if |g| < 1, e.g. near convergence, which can
+move atoms by many Angstroms, and too short if |g| > 1).
 """
 from __future__ import absolute_import, division, print_function
 from scitbx.array_family import flex
@@ -60,4 +66,8 @@ class curvature_preconditioner(object):
     self.last_evaluation = (x.deep_copy(), f, g.deep_copy(), d)
     if (self.last_request is None):
       self.last_request = (self.last_evaluation[0], g.deep_copy())
+      # first iteration: compensate the step length 1/|g| of scitbx.lbfgs
+      g_norm = g.norm()
+      if (g_norm > 0):
+        return f, g, d * g_norm
     return f, g, d
