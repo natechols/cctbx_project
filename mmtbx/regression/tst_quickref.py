@@ -147,17 +147,28 @@ def exercise_anisotropic(data_file):
   # start values as read back (ANISOU records are rounded)
   u_start = iotbx.pdb.input(file_name=model_file).xray_structure_simple().\
     scatterers().extract_u_star()
-  for anisotropic_adp in [True, False]:
+  for adp_type in ["anisotropic", "fixed_anisotropic"]:
     r = run_quickref(model_file, data_file, "tst_quickref_aniso",
-      ["number_of_macro_cycles=2", "anisotropic_adp=%s" % anisotropic_adp])
+      ["number_of_macro_cycles=2", "adp_type=%s" % adp_type])
     assert r.r_free < r.r_free_start
     xrs_final = r.model.get_xray_structure()
     assert xrs_final.use_u_aniso().all_eq(True)
     u_final = xrs_final.scatterers().extract_u_star()
     changed = flex.max(flex.abs(u_final.as_double() - u_start.as_double()))
     # (round-off from u_star <-> u_cart conversions is ~1.e-11)
-    if (anisotropic_adp): assert changed > 1.e-6, changed
-    else:                 assert changed < 1.e-8, changed
+    if (adp_type == "anisotropic"): assert changed > 1.e-6, changed
+    else:                           assert changed < 1.e-8, changed
+  # isotropic, and auto at 2 A (> anisotropic_d_min): converted to isotropic
+  for args in [["adp_type=isotropic"], []]:
+    r = run_quickref(model_file, data_file, "tst_quickref_aniso",
+      ["number_of_macro_cycles=1"] + args)
+    xrs_final = r.model.get_xray_structure()
+    assert xrs_final.use_u_aniso().count(True) == 0, args
+    assert xrs_final.use_u_iso().all_eq(True)
+  # auto with a high anisotropic_d_min: anisotropic
+  r = run_quickref(model_file, data_file, "tst_quickref_aniso",
+    ["number_of_macro_cycles=1", "anisotropic_d_min=2.5"])
+  assert r.model.get_xray_structure().use_u_aniso().all_eq(True)
 
 def exercise_reference_coordinate_restraints():
   import io, re
@@ -202,6 +213,74 @@ def exercise_reference_coordinate_restraints():
   assert 0 < n <= 8, n
   # tight restraints keep the model close to the start
   assert rmsd["tight"] < 0.5 * rmsd["none"], rmsd
+
+def exercise_input_tls():
+  """TLS records in the input model, with residual B-factors"""
+  import io, re
+  from mmtbx.tls import tools
+  from mmtbx.regression.tst_minimization_curvatures import get_model
+  from cctbx import adptbx
+  model = get_model()
+  xrs = model.get_xray_structure()
+  n = xrs.scatterers().size()
+  sel = flex.size_t(range(n))
+  tlsos = tools.generate_tlsos(selections=[sel], xray_structure=xrs,
+    T=[[0.10, 0.15, 0.12, 0.01, 0, 0.02]], L=[[2.0, 1.5, 3.0, 0.2, 0, 0.1]],
+    S=[[0, 0.01, 0, 0.02, 0, -0.01, 0, 0.01, 0]])
+  u_tls = tools.u_cart_from_tls(sites_cart=xrs.sites_cart(), selections=[sel],
+    tlsos=tlsos)
+  b_residual = flex.double([random.uniform(2, 15) for i in range(n)])
+  # data from U_tls + residual
+  xrs_true = xrs.deep_copy_scatterers()
+  xrs_true.convert_to_anisotropic()
+  xrs_true.set_u_cart(u_cart=flex.sym_mat3_double([
+    (u[0]+r, u[1]+r, u[2]+r, u[3], u[4], u[5]) for u, r in
+    zip(u_tls, b_residual * adptbx.b_as_u(1))]))
+  f_obs = abs(xrs_true.structure_factors(d_min=2.0,
+    algorithm="direct").f_calc())
+  flags = f_obs.generate_r_free_flags(fraction=0.1)
+  mtz = f_obs.as_mtz_dataset(column_root_label="F")
+  mtz.add_miller_array(flags, column_root_label="R-free-flags")
+  data_file = "tst_quickref_tls_data.mtz"
+  mtz.mtz_object().write(data_file)
+  # model: residual B-factors (no ANISOU) and TLS records
+  h = model.get_hierarchy().deep_copy()
+  h.atoms().set_b(b_residual)
+  model.determine_tls_groups(selection_strings=["chain A"],
+    generate_tlsos=[sel])
+  model.tls_groups.tlsos = tlsos
+  model_file = "tst_quickref_tls_start.pdb"
+  with open(model_file, "w") as f:
+    f.write(model.tls_groups_as_pdb())
+    f.write(h.as_pdb_string(crystal_symmetry=model.crystal_symmetry()))
+  def run(args):
+    log = io.StringIO()
+    r = run_program(program_class=quickref.Program, args=[model_file,
+      data_file, "output.prefix=tst_quickref_tls", "output.overwrite=True",
+      "number_of_macro_cycles=1", "write_map_coefficients=False"] + args,
+      logger=log)
+    return r, log.getvalue()
+  r_ignore, text = run(["input_tls.mode=ignore"])
+  assert "Input TLS" not in text
+  r_auto, text = run([])
+  assert re.search("Input TLS: 1 groups.*TLS applied", text), text
+  # starting model with the TLS contribution: lower R
+  assert r_auto.r_work_start < 0.7 * r_ignore.r_work_start, (
+    r_auto.r_work_start, r_ignore.r_work_start)
+  # TLS refinement of the input TLS group, starting from the input TLS
+  r_tls, text = run(["tls.enabled=True", "refinement.sites=False"])
+  assert "TLS refinement: 1 groups (%d atoms) from the input model" % n \
+    in text, text
+  # exact split U_tls + residual: the starting model reproduces the data
+  # (without TLS refinement, the atoms are made isotropic at this
+  # resolution, adp_type=auto)
+  assert r_tls.r_work_start < 0.01, r_tls.r_work_start
+  assert r_tls.r_work_start < r_auto.r_work_start
+  assert r_tls.r_work <= r_tls.r_work_start + 1.e-4
+  pdb_inp = iotbx.pdb.input(file_name=r_tls.model_file_name)
+  t = pdb_inp.extract_tls_params(pdb_inp.construct_hierarchy()).tls_params
+  assert len(t) == 1
+  assert approx_equal(t[0].t, tlsos[0].t, eps=0.03)
 
 def exercise_groups():
   """rigid-body, group ADP and TLS refinement"""
@@ -361,6 +440,7 @@ def run():
   exercise_ncs()
   exercise_reference_coordinate_restraints()
   exercise_groups()
+  exercise_input_tls()
   print("OK")
 
 if (__name__ == "__main__"):

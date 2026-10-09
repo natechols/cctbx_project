@@ -3,7 +3,7 @@ from __future__ import absolute_import, division, print_function
 from libtbx.program_template import ProgramTemplate
 from libtbx.utils import Sorry, null_out
 from libtbx import group_args
-from cctbx import xray
+from cctbx import xray, adptbx
 from cctbx.array_family import flex
 import iotbx.pdb
 import mmtbx
@@ -38,10 +38,18 @@ refinement
   adp = True
     .type = bool
     .help = Refine ADPs
-  anisotropic_adp = True
-    .type = bool
-    .help = Refine the anisotropic ADPs of atoms that have them (otherwise \
-            they are kept fixed). Atoms with isotropic ADPs remain isotropic.
+  adp_type = *auto isotropic anisotropic fixed_anisotropic
+    .type = choice
+    .help = ADPs of atoms that are anisotropic in the input model: refined \
+            anisotropically (anisotropic), converted to isotropic and refined \
+            isotropically (isotropic), or kept fixed (fixed_anisotropic). \
+            auto: anisotropic if the resolution is anisotropic_d_min or \
+            better, otherwise isotropic (with tls.enabled=True, the TLS \
+            contribution models the anisotropy). Atoms with isotropic ADPs \
+            remain isotropic.
+  anisotropic_d_min = 1.7
+    .type = float(value_min=0)
+    .help = Resolution limit for adp_type=auto
   simultaneous = True
     .type = bool
     .help = Refine coordinates and ADPs simultaneously (otherwise they are \
@@ -67,6 +75,12 @@ refinement
     .type = bool
     .help = Precondition the minimizer with approximate curvatures (diagonal \
             of the second derivatives) of the target
+  smooth_target = True
+    .type = bool
+    .expert_level = 2
+    .help = Keep the target smooth during each minimization (fixed ADP \
+            restraint pairs and restraint normalization), see \
+            mmtbx.refinement.minimization.lbfgs
   curvature_floor_fraction = 0.1
     .type = float(value_min=0)
     .help = Parameters without curvature information get this fraction of \
@@ -159,6 +173,18 @@ reference_coordinate_restraints
             levels off
   top_out = False
     .type = bool
+}
+input_tls
+  .short_caption = TLS in the input model
+{
+  mode = *auto apply ignore
+    .type = choice
+    .help = TLS groups and parameters of the input model (PDB REMARK 3 or \
+            mmCIF). apply: the ADPs are the TLS contribution plus the \
+            B-factors of the atom records (residual B-factors). ignore: the \
+            ADPs as read (ANISOU records and B-factors). auto: apply if this \
+            gives the lower R-work (as PDB-REDO). With tls.enabled=True, the \
+            input TLS groups are refined unless tls.group is given.
 }
 ncs
   .short_caption = NCS restraints
@@ -263,6 +289,8 @@ Usage examples:
     flex.set_random_seed(self.params.random_seed)
     model_name = self.data_manager.get_default_model_name()
     model = self.data_manager.get_model(model_name)
+    # (the model input, e.g. with TLS records, is not kept by get_fmodel)
+    self.model_input = model.get_model_input()
     if (model.crystal_symmetry() is None):
       raise Sorry("The model has no crystal symmetry.")
     if (model.get_hd_selection().count(True) > 0):
@@ -293,15 +321,17 @@ Usage examples:
     self._setup_ncs()
     self.iso_restraints = mmtbx.refinement.adp_refinement.\
       adp_restraints_master_params.extract().iso
+    self._setup_input_tls()
+    self._setup_adp_type()
     xrs = model.get_xray_structure()
     n_aniso = xrs.use_u_aniso().count(True)
     n_iso = xrs.use_u_iso().count(True)
-    if (p.adp and n_iso == 0 and not (n_aniso > 0 and p.anisotropic_adp)):
+    if (p.adp and n_iso == 0 and not (n_aniso > 0 and self.refine_anisotropic)):
       print("No refinable ADPs (all atoms are anisotropic and "
-        "anisotropic_adp=False): ADPs are not refined.", file=log)
+        "adp_type=fixed_anisotropic): ADPs are not refined.", file=log)
       p.adp = False
     if (p.adp and n_aniso > 0):
-      if (p.anisotropic_adp):
+      if (self.refine_anisotropic):
         print("%d atoms with anisotropic ADPs (refined anisotropically)." %
           n_aniso, file=log)
       else:
@@ -376,6 +406,117 @@ Usage examples:
 
   # ---------------------------------------------------------------------------
 
+  def _setup_input_tls(self):
+    """
+    TLS groups and parameters of the input model. If applied, the ADPs of
+    the atoms in TLS groups are U_tls + B (B: the residual B-factors of the
+    atom records).
+    """
+    from mmtbx.tls import tools
+    self.input_tls = None
+    mode = self.params.input_tls.mode
+    if (mode is None or mode == "ignore"): return
+    log = self.logger
+    model = self.model
+    model_input = self.model_input
+    if (model_input is None): return
+    try:
+      tls_params = model_input.extract_tls_params(
+        model.get_hierarchy()).tls_params
+    except Exception as e:
+      print("TLS records of the input model not interpreted: %s" % str(e),
+        file=log)
+      return
+    if (len(tls_params) == 0): return
+    selections, strings, tlsos = [], [], []
+    for t in tls_params:
+      try:
+        sel = model.selection(t.selection_string)
+      except Exception as e:
+        print("Input TLS group not interpreted (%s): %s: TLS is not used." % (
+          t.selection_string, str(e)), file=log)
+        return
+      if (sel.count(True) == 0): continue
+      selections.append(sel.iselection())
+      strings.append(t.selection_string)
+      tlsos.append(tools.tlso(t=t.t, l=t.l, s=t.s, origin=t.origin))
+    if (len(selections) == 0): return
+    xrs = model.get_xray_structure()
+    in_tls = flex.bool(xrs.scatterers().size(), False)
+    for sel in selections:
+      if ((in_tls.select(sel)).count(True) > 0):
+        print("Input TLS groups overlap: TLS is not used.", file=log)
+        return
+      in_tls.set_selected(sel, True)
+    tls_isel = in_tls.iselection()
+    u_tls = tools.u_cart_from_tls(sites_cart = xrs.sites_cart(),
+      selections = selections, tlsos = tlsos)
+    u_residual = model.get_hierarchy().atoms().extract_b() * adptbx.b_as_u(1)
+    xrs_tls = xrs.deep_copy_scatterers()
+    xrs_tls.convert_to_anisotropic(selection = in_tls)
+    u_total = xrs_tls.scatterers().extract_u_cart(xrs_tls.unit_cell())
+    for i_seq in tls_isel:
+      u = u_tls[i_seq]
+      r = u_residual[i_seq]
+      u_total[i_seq] = (u[0]+r, u[1]+r, u[2]+r, u[3], u[4], u[5])
+    xrs_tls.set_u_cart(u_cart = u_total, selection = tls_isel)
+    apply = (mode == "apply")
+    if (mode == "auto"):
+      def r_work(x):
+        fmodel = self.fmodel.deep_copy()
+        fmodel.update_xray_structure(xray_structure = x, update_f_calc = True,
+          update_f_mask = True)
+        fmodel.update_all_scales(remove_outliers = False)
+        return fmodel.r_work()
+      r_read, r_tls = r_work(xrs), r_work(xrs_tls)
+      apply = (r_tls < r_read)
+      print("Input TLS: %d groups; r_work with ADPs as read %.4f, with "
+        "TLS + residual B %.4f: %s" % (len(selections), r_read, r_tls,
+        ["ADPs as read", "TLS applied"][int(apply)]), file=log)
+    else:
+      print("Input TLS: %d groups, applied (TLS + residual B)" %
+        len(selections), file=log)
+    if (apply):
+      model.set_xray_structure(xrs_tls)
+      self.fmodel.update_xray_structure(xray_structure = xrs_tls,
+        update_f_calc = True, update_f_mask = True)
+    self.input_tls = group_args(
+      applied    = apply,
+      selections = selections,
+      strings    = strings,
+      tlsos      = tlsos,
+      u_tls      = u_tls,
+      u_residual = u_residual)
+
+  def _setup_adp_type(self):
+    """Anisotropic or isotropic refinement of anisotropic atoms."""
+    p = self.params.refinement
+    log = self.logger
+    adp_type = p.adp_type
+    d_min = self.fmodel.f_obs().d_min()
+    if (adp_type is None or adp_type == "auto"):
+      adp_type = ["isotropic", "anisotropic"][int(d_min <= p.anisotropic_d_min)]
+    self.refine_anisotropic = (adp_type == "anisotropic")
+    xrs = self.model.get_xray_structure()
+    aniso = xrs.use_u_aniso()
+    if (adp_type == "isotropic" and aniso.count(True) > 0):
+      # atoms of TLS groups that are refined with the input TLS keep the
+      # TLS contribution (see _setup_groups)
+      if (self.params.tls.enabled and self.input_tls is not None
+          and self.input_tls.applied
+          and len([s for s in self.params.tls.group if s is not None]) == 0):
+        for sel in self.input_tls.selections:
+          aniso.set_selected(sel, False)
+      n = aniso.count(True)
+      if (n > 0):
+        xrs.convert_to_isotropic(selection = aniso.iselection())
+        self.fmodel.update_xray_structure(update_f_calc = True)
+        print("%d anisotropic atoms converted to isotropic (adp_type=%s, "
+          "d_min=%.2f)." % (n, adp_type, d_min), file=log)
+        if (self.input_tls is not None and not self.params.tls.enabled):
+          print("  (the input model has TLS groups: consider "
+            "tls.enabled=True)", file=log)
+
   def _chain_selections(self, selection_strings, label):
     """
     Selections from selection strings, or one per chain (without water).
@@ -445,14 +586,34 @@ Usage examples:
       print("Group ADP refinement: %d groups" % len(self.group_adp_selections),
         file=log)
     self.individual_adp = (p.adp and self.group_adp_selections is None)
+    self.tls_presplit = False
     if (self.params.tls.enabled):
-      self.tls_selections, strings = self._chain_selections(
-        self.params.tls.group, "TLS groups")
+      use_input = (self.input_tls is not None and
+        len([s for s in self.params.tls.group if s is not None]) == 0)
+      if (use_input):
+        self.tls_selections = self.input_tls.selections
+        strings = self.input_tls.strings
+      else:
+        self.tls_selections, strings = self._chain_selections(
+          self.params.tls.group, "TLS groups")
       xrs = self.model.get_xray_structure()
       self.tls_selection_bool = flex.bool(xrs.scatterers().size(), False)
       for sel in self.tls_selections:
         self.tls_selection_bool.set_selected(sel, True)
       n_aniso = (xrs.use_u_aniso() & self.tls_selection_bool).count(True)
+      if (use_input and self.input_tls.applied):
+        # exact split of the ADPs: U_tls (anisotropic) + residual u_iso
+        uc = xrs.unit_cell()
+        scatterers = xrs.scatterers()
+        for i_seq in self.tls_selection_bool.iselection():
+          sc = scatterers[i_seq]
+          sc.u_star = adptbx.u_cart_as_u_star(uc, self.input_tls.u_tls[i_seq])
+          sc.u_iso = self.input_tls.u_residual[i_seq]
+          sc.flags.set_use_u_iso(True)
+          sc.flags.set_use_u_aniso(True)
+        self.fmodel.update_xray_structure(update_f_calc = True)
+        self.tls_presplit = True
+        n_aniso = 0
       if (n_aniso > 0):
         # the individual contribution of atoms in TLS groups is isotropic
         xrs.convert_to_isotropic(
@@ -462,9 +623,12 @@ Usage examples:
           file=log)
       self.model.determine_tls_groups(selection_strings = strings,
         generate_tlsos = self.tls_selections)
-      print("TLS refinement: %d groups (%d atoms)" % (
-        len(self.tls_selections), self.tls_selection_bool.count(True)),
-        file=log)
+      if (use_input):
+        # start from the input TLS parameters
+        self.model.tls_groups.tlsos = self.input_tls.tlsos
+      print("TLS refinement: %d groups (%d atoms)%s" % (
+        len(self.tls_selections), self.tls_selection_bool.count(True),
+        [""," from the input model"][int(use_input)]), file=log)
 
   def _sync_model(self):
     """The group minimizers may replace fmodel.xray_structure."""
@@ -516,7 +680,7 @@ Usage examples:
     fmodel = self.fmodel
     xrs = fmodel.xray_structure
     tls_isel = self.tls_selection_bool.iselection()
-    if (first):
+    if (first and not self.tls_presplit):
       scatterers = xrs.scatterers()
       for i_seq in tls_isel:
         sc = scatterers[i_seq]
@@ -624,7 +788,7 @@ Usage examples:
     # u_iso (u_aniso) flags are only set for isotropic (anisotropic) atoms;
     # for atoms in TLS groups only the isotropic contribution is refined
     aniso = self._individual_aniso_selection()
-    refine_aniso = (refine_adp and self.params.refinement.anisotropic_adp
+    refine_aniso = (refine_adp and self.refine_anisotropic
                     and aniso.count(True) > 0)
     refine_iso = (refine_adp and xrs.use_u_iso().count(True) > 0)
     xray.set_scatterer_grad_flags(
@@ -743,7 +907,8 @@ Usage examples:
       curvature_floor_fraction = p.curvature_floor_fraction,
       occupancy_groups         = occupancy_groups,
       occupancy_min            = p.occupancy_min,
-      occupancy_max            = p.occupancy_max)
+      occupancy_max            = p.occupancy_max,
+      smooth_target            = p.smooth_target)
     return m.minimizer.iter()
 
   def _refine_occupancies(self):
