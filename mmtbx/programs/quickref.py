@@ -139,15 +139,22 @@ group_adp
 tls
   .short_caption = TLS refinement
 {
-  enabled = False
+  enabled = Auto
     .type = bool
     .help = Refine TLS parameters in a separate step in each macro-cycle. \
             The ADPs of the atoms in TLS groups are the TLS contribution \
-            plus an individual isotropic (or group) contribution.
+            plus an individual isotropic (or group) contribution. Auto: \
+            enabled if the ADPs are refined isotropically (see \
+            refinement.adp_type, i.e. at d_min > anisotropic_d_min with \
+            adp_type=auto).
   group = None
     .type = atom_selection
     .multiple = True
-    .help = TLS groups (default: one group per chain, without water)
+    .help = TLS groups (default: the TLS groups of the input model, or one \
+            group per chain, without water)
+  min_group_size = 50
+    .type = int(value_min=1)
+    .help = Default groups (one per chain) with fewer atoms are not used
   max_iterations = 25
     .type = int(value_min=1)
 }
@@ -250,10 +257,13 @@ coordinates and ADPs (occupancies_simultaneous=False: in a separate step).
 Optionally, torsion-angle or Cartesian NCS restraints are used
 (ncs.type=torsion or ncs.type=cartesian), with automatically found groups.
 
+Anisotropic atoms are refined anisotropically at a resolution of 1.7 A or
+better, otherwise isotropically, with TLS refinement as a separate step
+(refinement.adp_type, tls.enabled).
+
 Alternatives (off by default): rigid-body refinement instead of individual
-coordinates (rigid_body.enabled=True), group ADP refinement instead of
-individual ADPs (group_adp.enabled=True), and TLS refinement as a separate
-step (tls.enabled=True).
+coordinates (rigid_body.enabled=True) and group ADP refinement instead of
+individual ADPs (group_adp.enabled=True).
 
 Inputs:
   - Model file (PDB or mmCIF)
@@ -321,6 +331,7 @@ Usage examples:
     self._setup_ncs()
     self.iso_restraints = mmtbx.refinement.adp_refinement.\
       adp_restraints_master_params.extract().iso
+    self._resolve_tls_enabled()
     self._setup_input_tls()
     self._setup_adp_type()
     xrs = model.get_xray_structure()
@@ -488,14 +499,31 @@ Usage examples:
       u_tls      = u_tls,
       u_residual = u_residual)
 
+  def _resolved_adp_type(self):
+    p = self.params.refinement
+    adp_type = p.adp_type
+    if (adp_type is None or adp_type == "auto"):
+      d_min = self.fmodel.f_obs().d_min()
+      adp_type = ["isotropic", "anisotropic"][int(d_min <= p.anisotropic_d_min)]
+    return adp_type
+
+  def _resolve_tls_enabled(self):
+    """tls.enabled=Auto: TLS refinement if the ADPs are refined
+    isotropically."""
+    from libtbx import Auto
+    self.tls_auto = (self.params.tls.enabled is Auto)
+    if (self.tls_auto):
+      self.params.tls.enabled = (self._resolved_adp_type() == "isotropic")
+      if (self.params.tls.enabled):
+        print("TLS refinement enabled (isotropic ADPs at d_min=%.2f)" %
+          self.fmodel.f_obs().d_min(), file=self.logger)
+
   def _setup_adp_type(self):
     """Anisotropic or isotropic refinement of anisotropic atoms."""
     p = self.params.refinement
     log = self.logger
-    adp_type = p.adp_type
     d_min = self.fmodel.f_obs().d_min()
-    if (adp_type is None or adp_type == "auto"):
-      adp_type = ["isotropic", "anisotropic"][int(d_min <= p.anisotropic_d_min)]
+    adp_type = self._resolved_adp_type()
     self.refine_anisotropic = (adp_type == "anisotropic")
     xrs = self.model.get_xray_structure()
     aniso = xrs.use_u_aniso()
@@ -517,14 +545,17 @@ Usage examples:
           print("  (the input model has TLS groups: consider "
             "tls.enabled=True)", file=log)
 
-  def _chain_selections(self, selection_strings, label):
+  def _chain_selections(self, selection_strings, label, min_size=1,
+        allow_none=False):
     """
-    Selections from selection strings, or one per chain (without water).
+    Selections from selection strings, or one per chain (without water;
+    chains with fewer than min_size atoms are not used).
     Returns the selections (flex.size_t) and selection strings.
     """
     model = self.model
     selection_strings = [s for s in selection_strings if s is not None]
-    if (len(selection_strings) == 0):
+    default = (len(selection_strings) == 0)
+    if (default):
       chain_ids = []
       for chain in model.get_hierarchy().only_model().chains():
         if (chain.id not in chain_ids): chain_ids.append(chain.id)
@@ -536,12 +567,14 @@ Usage examples:
       if (sel.count(True) == 0):
         if (s.endswith(" and not water")): continue # e.g. a water chain
         raise Sorry("%s: empty selection: %s" % (label, s))
+      if (default and sel.count(True) < min_size): continue
       if ((used & sel).count(True) > 0):
         raise Sorry("%s: overlapping selections (%s)" % (label, s))
       used |= sel
       selections.append(sel.iselection())
       strings.append(s)
     if (len(selections) == 0):
+      if (allow_none): return None, None
       raise Sorry("%s: no groups." % label)
     return selections, strings
 
@@ -595,7 +628,14 @@ Usage examples:
         strings = self.input_tls.strings
       else:
         self.tls_selections, strings = self._chain_selections(
-          self.params.tls.group, "TLS groups")
+          self.params.tls.group, "TLS groups",
+          min_size = self.params.tls.min_group_size,
+          allow_none = self.tls_auto)
+        if (self.tls_selections is None):
+          print("No TLS groups with at least %d atoms: TLS is not refined." %
+            self.params.tls.min_group_size, file=log)
+          self.params.tls.enabled = False
+    if (self.params.tls.enabled):
       xrs = self.model.get_xray_structure()
       self.tls_selection_bool = flex.bool(xrs.scatterers().size(), False)
       for sel in self.tls_selections:
