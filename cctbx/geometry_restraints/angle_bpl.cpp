@@ -154,6 +154,8 @@ namespace {
           arg("epsilon")=1e-100))
         .def("gradients", &w_t::gradients, (
           arg("epsilon")=1e-100))
+        .def("curvatures", &w_t::curvatures, (
+          arg("epsilon")=1e-100))
         .def_pickle(angle_wrappers())
         ;
     }
@@ -221,6 +223,25 @@ namespace {
         af::ref<scitbx::vec3<double> > const&))
       angle_residual_sum,
       (arg("unit_cell"), arg("sites_cart"), arg("proxies"), arg("gradient_array")));
+    def("angle_residual_sum",
+      (double(*)(
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<angle_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+      angle_residual_sum,
+      (arg("sites_cart"), arg("proxies"), arg("gradient_array"),
+       arg("curvature_array")));
+    def("angle_residual_sum",
+      (double(*)(
+        uctbx::unit_cell const&,
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<angle_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+      angle_residual_sum,
+      (arg("unit_cell"), arg("sites_cart"), arg("proxies"),
+       arg("gradient_array"), arg("curvature_array")));
   }
 
 } // namespace <anonymous>

@@ -1455,18 +1455,27 @@ class torsion_ncs(object):
   def size(self):
     return self.get_n_proxies()
 
-  def target_and_gradients(self, sites_cart, unit_cell, gradient_array):
+  # target_and_gradients accepts curvature_array
+  supports_curvatures = True
+
+  def target_and_gradients(self, sites_cart, unit_cell, gradient_array,
+        curvature_array=None):
+    kwds = {}
+    if (curvature_array is not None):
+      kwds["curvature_array"] = curvature_array
     if unit_cell is None:
       return cctbx.geometry_restraints.dihedral_residual_sum(
         sites_cart=sites_cart,
         proxies=self.ncs_dihedral_proxies,
-        gradient_array=gradient_array)
+        gradient_array=gradient_array,
+        **kwds)
     else:
       return cctbx.geometry_restraints.dihedral_residual_sum(
           unit_cell=unit_cell,
           sites_cart=sites_cart,
           proxies=self.ncs_dihedral_proxies,
-          gradient_array=gradient_array)
+          gradient_array=gradient_array,
+          **kwds)
 
 # XXX wrapper for running in Phenix GUI
 class _run_iotbx_ncs_input(object):

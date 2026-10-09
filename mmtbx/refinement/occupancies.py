@@ -4,6 +4,7 @@ from mmtbx.utils import get_atom_selections
 import mmtbx.utils
 from cctbx.array_family import flex
 from scitbx import lbfgs
+from scitbx.lbfgs.curvature_preconditioner import curvature_preconditioner
 from libtbx.str_utils import format_value, make_sub_header
 from libtbx.utils import Sorry, null_out
 from libtbx import adopt_init_args
@@ -17,7 +18,14 @@ class manager(object):
                      occupancy_max               = None,
                      occupancy_min               = None,
                      log                         = None,
-                     exclude_hd                  = False):
+                     exclude_hd                  = False,
+                     use_curvatures              = False,
+                     curvature_floor_fraction    = 0.1):
+    """
+    If use_curvatures is True, the minimizer is preconditioned with the
+    approximate curvatures of the X-ray target with respect to the group
+    occupancies (see minimizer).
+    """
     self.show(fmodels=fmodels, log= log, message="occupancy refinement: start")
     fmodels.update_xray_structure(xray_structure = model.get_xray_structure(),
                                   update_f_calc  = True)
@@ -75,7 +83,9 @@ class manager(object):
           selections                    = selections,
           constrained_groups_selections = constrained_groups_selections,
           par_initial                   = par_initial,
-          max_number_of_iterations      = max_number_of_iterations)
+          max_number_of_iterations      = max_number_of_iterations,
+          use_curvatures                = use_curvatures,
+          curvature_floor_fraction      = curvature_floor_fraction)
         mm = getattr(minimized, "minimizer", None)
         if(mm is not None):
           n_iterations_total += mm.iter()
@@ -136,7 +146,17 @@ class minimizer(object):
                constrained_groups_selections,
                selections,
                par_initial,
-               max_number_of_iterations):
+               max_number_of_iterations,
+               use_curvatures = False,
+               curvature_floor_fraction = 0.1):
+    """
+    If use_curvatures is True, the minimizer is preconditioned with
+    approximate curvatures of the X-ray target with respect to the
+    parameters: the curvature of a group occupancy is the sum of the
+    random-phase approximations of the curvatures with respect to the
+    occupancies of its atoms (cctbx.xray.structure.curvatures_random_phase).
+    See scitbx.lbfgs.curvature_preconditioner.
+    """
     adopt_init_args(self, locals())
     self.fmodels.create_target_functors()
     self.fmodels.prepare_target_functors_for_minimization()
@@ -145,6 +165,13 @@ class minimizer(object):
     self.par_min = self.par_initial.deep_copy()
     self.x = self.pack(self.par_min)
     self.n = self.x.size()
+    if(use_curvatures):
+      if(self.fmodels.fmodel_neutron() is not None):
+        raise Sorry("Curvatures are not available for neutron refinement.")
+      self.curvatures = self.parameter_curvatures()
+      self.curvature_preconditioner = curvature_preconditioner(
+        floor_fraction = curvature_floor_fraction)
+      self.diag_mode = "always"
     self.minimizer = lbfgs.run(
     target_evaluator = self,
     termination_params = lbfgs.termination_parameters(
@@ -154,6 +181,34 @@ class minimizer(object):
       ignore_line_search_failed_step_at_upper_bound = True))
     self.compute_functional_and_gradients()
     del self.x
+
+  def parameter_curvatures(self):
+    """Approximate curvatures with respect to the packed parameters."""
+    fmodel = self.fmodels.fmodel_xray()
+    tr = self.fmodels.target_functor_xray(compute_gradients = False)
+    from mmtbx.refinement.minimization import curvatures_reflection_stride
+    indices = fmodel.f_obs_work().indices()
+    c_atoms = fmodel.xray_structure.curvatures_random_phase(
+      miller_indices    = indices,
+      target_curvatures = tr.curvatures_work(),
+      reflection_stride = curvatures_reflection_stride(indices.size())
+      ).occupancy
+    c_groups = flex.double()
+    for sel in self.selections:
+      for sel_ in sel:
+        c_groups.append(flex.sum(c_atoms.select(sel_)))
+    return pack_curvatures(x = c_groups,
+      table = self.constrained_groups_selections)
+
+  def compute_functional_gradients_diag(self):
+    """
+    Called by scitbx.lbfgs.run() if self.diag_mode is not None.
+    Returns the diagonal of the inverse Hessian approximation Hk0.
+    """
+    def compute():
+      f, g = self.compute_functional_and_gradients()
+      return f, g, self.curvatures
+    return self.curvature_preconditioner(self.x, compute)
 
   def pack(self, par):
     return pack_unpack(x = par, table = self.constrained_groups_selections)
@@ -235,10 +290,31 @@ def pack_gradients(x, table):
     elif(len(indices) == 2):
       i0,i1 = indices
       result[i0] = x[i0] - x[i1]
-      result[i1] =-x[i1] # ??? zero or this value?
+      # the target does not depend on the last parameter of a constrained
+      # group (see pack_unpack)
+      result[i1] = 0
     else :
       for i in indices[0:-1] :
         result[i] = x[i] - x[indices[-1]]
+      result[indices[-1]] = 0
+  return result
+
+def pack_curvatures(x, table):
+  """
+  Gauss-Newton curvatures with respect to the packed parameters, given the
+  curvatures x with respect to the group occupancies (cross terms between
+  groups are neglected). Changing a free parameter of a constrained group
+  changes the occupancy of the last group in the opposite direction. The
+  target does not depend on the last parameter (curvature 0).
+  """
+  result = flex.double(x.size(), 0)
+  for indices in table :
+    if(len(indices) == 1):
+      i0 = indices[0]
+      result[i0] = x[i0]
+    else :
+      for i in indices[0:-1] :
+        result[i] = x[i] + x[indices[-1]]
       result[indices[-1]] = 0
   return result
 

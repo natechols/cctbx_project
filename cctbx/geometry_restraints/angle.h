@@ -311,6 +311,68 @@ namespace cctbx { namespace geometry_restraints {
         return result;
       }
 
+      //! Approximate curvatures (diagonal of the 2nd derivative matrix).
+      /*! Gauss-Newton approximation 2 * weight * (d(delta)/d(x))^2,
+          i.e. the term with the 2nd derivative of the angle is
+          neglected. Unlike the exact curvatures returned by
+          grads_and_curvs(), the result is never negative and is
+          therefore suitable for preconditioning the LBFGS minimizer.
+       */
+      af::tiny<scitbx::vec3<double>, 3>
+      curvatures(double epsilon=1e-100) const
+      {
+        af::tiny<scitbx::vec3<double>, 3> result;
+        if (!curvatures_are_nonzero(epsilon)) {
+          std::fill_n(result.begin(), 3U, scitbx::vec3<double>(0,0,0));
+          return result;
+        }
+        result = d_angle_d_sites();
+        for (std::size_t i=0; i<3; i++) {
+          result[i] = 2 * weight * result[i].each_mul(result[i]);
+        }
+        return result;
+      }
+
+      //! Support for angle_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        angle_proxy::i_seqs_type const& i_seqs) const
+      {
+        if (!curvatures_are_nonzero()) return;
+        add_gauss_newton_curvatures(
+          curvature_array, i_seqs, d_angle_d_sites().begin(), 2 * weight);
+      }
+
+      //! Support for angle_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+
+          The Gauss-Newton curvature of a symmetry-related site is
+          computed from the gradient rotated back to the original site,
+          which yields the exact diagonal of the rotated Gauss-Newton
+          approximation.
+       */
+      void
+      add_curvatures(
+        uctbx::unit_cell const& unit_cell,
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        angle_proxy const& proxy) const
+      {
+        if (!curvatures_are_nonzero()) return;
+        optional_container<af::shared<sgtbx::rt_mx> > const&
+          sym_ops = proxy.sym_ops;
+        af::tiny<scitbx::vec3<double>, 3> grad_delta = d_angle_d_sites();
+        for(int i=0;i<3;i++) {
+          if ( sym_ops.get() != 0 && !sym_ops[i].is_unit_mx() ) {
+            grad_delta[i] = r_inv_cart(unit_cell, sym_ops[i]) * grad_delta[i];
+          }
+        }
+        add_gauss_newton_curvatures(
+          curvature_array, proxy.i_seqs, grad_delta.begin(), 2 * weight);
+      }
+
       //! Support for angle_residual_sum.
       /*! Not available in Python.
        */
@@ -399,6 +461,14 @@ namespace cctbx { namespace geometry_restraints {
       unsigned char origin_id;
 
     protected:
+      bool
+      curvatures_are_nonzero(double epsilon=1e-100) const
+      {
+        return have_angle_model
+            && (delta < -slack || delta > slack)
+            && std::sqrt(1-scitbx::fn::pow2(cos_angle_model)) >= epsilon;
+      }
+
       void
       init_deltas()
       {
@@ -532,6 +602,35 @@ namespace cctbx { namespace geometry_restraints {
   {
     return detail::generic_residual_sum<angle_proxy, angle>::get(
       unit_cell, sites_cart, proxies, gradient_array);
+  }
+
+  /*! The angle::curvatures() are added to the curvature_array if
+      curvature_array.size() == sites_cart.size(). See other overload.
+   */
+  inline
+  double
+  angle_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<angle_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<angle_proxy, angle>::get(
+      sites_cart, proxies, gradient_array, curvature_array);
+  }
+
+  //! See overload.
+  inline
+  double
+  angle_residual_sum(
+    uctbx::unit_cell const& unit_cell,
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<angle_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<angle_proxy, angle>::get(
+      unit_cell, sites_cart, proxies, gradient_array, curvature_array);
   }
 
 }} // namespace cctbx::geometry_restraints

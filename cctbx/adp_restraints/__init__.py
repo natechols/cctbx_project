@@ -25,7 +25,13 @@ class energies_iso(scitbx.restraints.energies):
         compute_gradients=True,
         gradients=None,
         normalization=False,
-        collect=False):
+        collect=False,
+        compute_curvatures=False):
+    """
+    If compute_curvatures is True, self.curvatures contains the
+    Gauss-Newton approximation of the diagonal of the 2nd derivatives
+    with respect to u_iso (always >= 0).
+    """
     scitbx.restraints.energies.__init__(self,
       compute_gradients=compute_gradients,
       gradients=gradients,
@@ -55,11 +61,14 @@ class energies_iso(scitbx.restraints.energies):
       average_power=parameters.average_power,
       min_u_sum=1.e-6,
       compute_gradients=compute_gradients,
-      collect=collect)
+      collect=collect,
+      compute_curvatures=compute_curvatures)
     self.number_of_restraints += energies.number_of_restraints
     self.residual_sum += energies.residual_sum
     if (compute_gradients):
       self.gradients += energies.gradients
+    if (compute_curvatures):
+      self.curvatures = energies.curvatures
     if (not collect):
       self.u_i = None
       self.u_j = None
@@ -89,6 +98,10 @@ class energies_iso(scitbx.restraints.energies):
       self.residual_sum += w * u_diff**2 / wilson_u
       if (compute_gradients):
         self.gradients = self.gradients + w * g_wilson
+      if (compute_curvatures):
+        # w * (mean(u) - wilson_u)**2 / wilson_u is quadratic
+        self.curvatures = self.curvatures \
+          + 2 * w / (u_isos.size()**2 * wilson_u)
     self.finalize_target_and_gradients()
 
 class adp_aniso_restraints(object):
@@ -130,6 +143,12 @@ class adp_aniso_restraints(object):
     self.gradients_aniso_cart = result.gradients_aniso_cart()
     self.gradients_aniso_star = adptbx.grad_u_cart_as_u_star(unit_cell,
                                                self.gradients_aniso_cart)
+    # Diagonal of the 2nd derivatives (exact, the target is quadratic)
+    if (n_grad_u_iso == 0):
+      self.curvatures_iso = None
+    else :
+      self.curvatures_iso = result.curvatures_iso()
+    self.curvatures_aniso_cart = result.curvatures_aniso_cart()
 
 @bp.inject_into(adp_similarity)
 class _():

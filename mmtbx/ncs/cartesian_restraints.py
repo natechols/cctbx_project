@@ -77,13 +77,20 @@ class cartesian_ncs_manager(object):
         average_power,
         compute_gradients=True,
         gradients=None,
-        normalization=False):
+        normalization=False,
+        compute_curvatures=False):
+    """
+    If compute_curvatures is True, result.curvatures contains the
+    Gauss-Newton approximation of the diagonal of the 2nd derivatives.
+    """
     result = scitbx.restraints.energies(
       compute_gradients=compute_gradients,
       gradients=gradients,
       gradients_size=u_isos.size(),
       gradients_factory=flex.double,
       normalization=normalization)
+    if (compute_curvatures):
+      result.curvatures = flex.double(u_isos.size(), 0)
     result.rms_with_respect_to_averages = []
     if (self.ncs_params.b_factor_weight is None
         or self.ncs_params.b_factor_weight <= 0):
@@ -95,7 +102,8 @@ class cartesian_ncs_manager(object):
             b_factor_weight=self.ncs_params.b_factor_weight,
             average_power=average_power,
             compute_gradients=compute_gradients,
-            gradients=result.gradients)
+            gradients=result.gradients,
+            curvatures=result.curvatures)
         result += contribution
         result.rms_with_respect_to_averages.append(
             contribution.rms_with_respect_to_average)
@@ -138,7 +146,13 @@ class cartesian_ncs_manager(object):
         sites_cart,
         compute_gradients=True,
         gradients=None,
-        normalization=False):
+        normalization=False,
+        compute_curvatures=False):
+    """
+    If compute_curvatures is True, result.curvatures contains the diagonal
+    of the 2nd derivatives for fixed NCS operators (exact for the
+    harmonic restraints to the NCS average).
+    """
     self.compute_operators(sites_cart=sites_cart)
     result = scitbx.restraints.energies(
       compute_gradients=compute_gradients,
@@ -146,6 +160,8 @@ class cartesian_ncs_manager(object):
       gradients_size=sites_cart.size(),
       gradients_factory=flex.vec3_double,
       normalization=normalization)
+    if (compute_curvatures):
+      result.curvatures = flex.vec3_double(sites_cart.size(), (0,0,0))
     result.rms_with_respect_to_averages = []
     if (self.ncs_params.coordinate_sigma is None
         or self.ncs_params.coordinate_sigma <= 0):
@@ -156,7 +172,8 @@ class cartesian_ncs_manager(object):
             sites_cart=sites_cart,
             coordinate_sigma = self.ncs_params.coordinate_sigma,
             compute_gradients=compute_gradients,
-            gradients=result.gradients)
+            gradients=result.gradients,
+            curvatures=result.curvatures)
         result += contribution
         result.rms_with_respect_to_averages.append(
             contribution.rms_with_respect_to_average)
@@ -333,28 +350,32 @@ class _group(object):
         b_factor_weight,
         average_power,
         compute_gradients=True,
-        gradients=None):
+        gradients=None,
+        curvatures=None):
     return _energies_adp_iso(
       group=self,
       u_isos=u_isos,
       b_factor_weight=b_factor_weight,
       average_power=average_power,
       compute_gradients=compute_gradients,
-      gradients=gradients)
+      gradients=gradients,
+      curvatures=curvatures)
 
   def energies_sites(self,
         sites_cart,
         coordinate_sigma,
         compute_gradients=True,
         gradients=None,
-        sites_average=None):
+        sites_average=None,
+        curvatures=None):
     return _energies_sites(
       group=self,
       sites_cart=sites_cart,
       coordinate_sigma=coordinate_sigma,
       compute_gradients=compute_gradients,
       gradients=gradients,
-      sites_average=sites_average)
+      sites_average=sites_average,
+      curvatures=curvatures)
 
 class _energies_adp_iso(scitbx.restraints.energies):
 
@@ -364,7 +385,9 @@ class _energies_adp_iso(scitbx.restraints.energies):
         b_factor_weight,
         average_power,
         compute_gradients,
-        gradients):
+        gradients,
+        curvatures=None):
+    """curvatures (flex.double) are accumulated in place if not None."""
     scitbx.restraints.energies.__init__(self,
       compute_gradients=compute_gradients,
       gradients=gradients,
@@ -407,12 +430,22 @@ class _energies_adp_iso(scitbx.restraints.energies):
         u_isos_current=u_isos.select(pair[1]),
         u_isos_average=u_isos_average.select(pair[0]))
     self.weight = b_factor_weight
-    self.residual_sum = self.group.registry.adp_iso_residual_sum(
-      weight=self.weight,
-      average_power=self.average_power,
-      u_isos=u_isos,
-      u_average_min=self.group.u_average_min,
-      gradients=self.gradients)
+    if (curvatures is None):
+      self.residual_sum = self.group.registry.adp_iso_residual_sum(
+        weight=self.weight,
+        average_power=self.average_power,
+        u_isos=u_isos,
+        u_average_min=self.group.u_average_min,
+        gradients=self.gradients)
+    else:
+      self.residual_sum = \
+        self.group.registry.adp_iso_residual_sum_and_curvatures(
+          weight=self.weight,
+          average_power=self.average_power,
+          u_isos=u_isos,
+          u_average_min=self.group.u_average_min,
+          gradients=self.gradients,
+          curvatures=curvatures)
     self.finalize_target_and_gradients()
     self.u_isos_count = u_isos_count
     self.u_isos_average = u_isos_average
@@ -449,7 +482,12 @@ class _energies_sites(scitbx.restraints.energies):
         coordinate_sigma,
         compute_gradients,
         gradients,
-        sites_average):
+        sites_average,
+        curvatures=None):
+    """
+    curvatures (flex.vec3_double) are accumulated in place if not None:
+    2*weight*(1-1/n) for each coordinate of an atom in n NCS copies.
+    """
     scitbx.restraints.energies.__init__(self,
       compute_gradients=compute_gradients,
       gradients=gradients,
@@ -501,6 +539,19 @@ class _energies_sites(scitbx.restraints.energies):
         self.residual_contribution(
           sites_current=sites_cart.select(pair[1]),
           sites_average=op.inverse() * sites_average.select(pair[0]))
+    if (curvatures is not None):
+      # number of copies for the atoms of the reference and of each copy
+      n_copies = sites_count.as_double()
+      c_ref = flex.double(n_copies.size(), 0)
+      ref_sel = (n_copies > 0)
+      c_ref.set_selected(ref_sel,
+        2 * self.weight * (1 - 1 / n_copies.select(ref_sel)))
+      def add(i_seqs, values):
+        curvatures.add_selected(i_seqs, flex.vec3_double(values, values,
+          values))
+      add(sel, c_ref.select(sel))
+      for pair in selection_pairs:
+        add(pair[1], c_ref.select(pair[0]))
     self.finalize_target_and_gradients()
     self.sites_count = sites_count
     self.sites_average = sites_average

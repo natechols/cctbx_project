@@ -48,6 +48,37 @@ namespace cctbx { namespace geometry_restraints {
     return d;
   }
 
+  //! Gauss-Newton curvatures of a restraint involving several sites.
+  /*! Adds d2r * g * g (element-wise) to curvature_array[i_seq] for each
+      unique i_seq, where d2r is the 2nd derivative of the residual with
+      respect to delta and g is the sum of grad_delta[i] over all sites i
+      with the same i_seq (e.g. a site and its symmetry copy). Not
+      available in Python.
+   */
+  template <typename ISeqsType>
+  void
+  add_gauss_newton_curvatures(
+    af::ref<scitbx::vec3<double> > const& curvature_array,
+    ISeqsType const& i_seqs,
+    scitbx::vec3<double> const* grad_delta,
+    double d2r)
+  {
+    if (d2r <= 0) return;
+    std::size_t n = i_seqs.size();
+    for(std::size_t i=0;i<n;i++) {
+      bool seen = false;
+      for(std::size_t j=0;j<i;j++) {
+        if (i_seqs[j] == i_seqs[i]) { seen = true; break; }
+      }
+      if (seen) continue;
+      scitbx::vec3<double> g = grad_delta[i];
+      for(std::size_t j=i+1;j<n;j++) {
+        if (i_seqs[j] == i_seqs[i]) g += grad_delta[j];
+      }
+      curvature_array[i_seqs[i]] += d2r * g.each_mul(g);
+    }
+  }
+
   namespace detail {
 
     template <typename ProxyType, typename RestraintType>
@@ -237,6 +268,63 @@ namespace cctbx { namespace geometry_restraints {
           result += restraint.residual();
           if (gradient_array.size() != 0) {
             restraint.add_gradients(unit_cell, gradient_array, proxy);
+          }
+        }
+        return result;
+      }
+
+      //! Also accumulates curvatures if curvature_array.size() != 0.
+      static
+      double
+      get(
+        af::const_ref<scitbx::vec3<double> > const& sites_cart,
+        af::const_ref<ProxyType> const& proxies,
+        af::ref<scitbx::vec3<double> > const& gradient_array,
+        af::ref<scitbx::vec3<double> > const& curvature_array)
+      {
+        CCTBX_ASSERT(   gradient_array.size() == 0
+                     || gradient_array.size() == sites_cart.size());
+        CCTBX_ASSERT(   curvature_array.size() == 0
+                     || curvature_array.size() == sites_cart.size());
+        double result = 0;
+        for(std::size_t i=0;i<proxies.size();i++) {
+          ProxyType const& proxy = proxies[i];
+          RestraintType restraint(sites_cart, proxy);
+          result += restraint.residual();
+          if (gradient_array.size() != 0) {
+            restraint.add_gradients(gradient_array, proxy.i_seqs);
+          }
+          if (curvature_array.size() != 0) {
+            restraint.add_curvatures(curvature_array, proxy.i_seqs);
+          }
+        }
+        return result;
+      }
+
+      //! Also accumulates curvatures if curvature_array.size() != 0.
+      static
+      double
+      get(
+        uctbx::unit_cell const& unit_cell,
+        af::const_ref<scitbx::vec3<double> > const& sites_cart,
+        af::const_ref<ProxyType> const& proxies,
+        af::ref<scitbx::vec3<double> > const& gradient_array,
+        af::ref<scitbx::vec3<double> > const& curvature_array)
+      {
+        CCTBX_ASSERT(   gradient_array.size() == 0
+                     || gradient_array.size() == sites_cart.size());
+        CCTBX_ASSERT(   curvature_array.size() == 0
+                     || curvature_array.size() == sites_cart.size());
+        double result = 0;
+        for(std::size_t i=0;i<proxies.size();i++) {
+          ProxyType const& proxy = proxies[i];
+          RestraintType restraint(unit_cell, sites_cart, proxy);
+          result += restraint.residual();
+          if (gradient_array.size() != 0) {
+            restraint.add_gradients(unit_cell, gradient_array, proxy);
+          }
+          if (curvature_array.size() != 0) {
+            restraint.add_curvatures(unit_cell, curvature_array, proxy);
           }
         }
         return result;

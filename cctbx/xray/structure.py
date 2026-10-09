@@ -1921,6 +1921,26 @@ class structure(crystal.special_position_settings):
       da_db=da_db,
       daa_dbb_dab=daa_dbb_dab)
 
+  def curvatures_random_phase(self, miller_indices, target_curvatures,
+        b_iso_grid_step=1, use_table=True, reflection_stride=1):
+    """
+    Random-phase approximation of the Gauss-Newton curvatures of a
+    structure factor target with respect to the Cartesian coordinates,
+    u_iso and occupancies. target_curvatures are the (non-negative)
+    second derivatives of the target with respect to abs(f_calc) for
+    each of the miller_indices. See cctbx/xray/curvatures_random_phase.h
+    """
+    return ext.structure_factors_curvatures_random_phase(
+      unit_cell=self.unit_cell(),
+      space_group=self.space_group(),
+      scatterers=self.scatterers(),
+      scattering_type_registry=self.scattering_type_registry(),
+      miller_indices=miller_indices,
+      target_curvatures=target_curvatures,
+      b_iso_grid_step=b_iso_grid_step,
+      use_table=use_table,
+      reflection_stride=reflection_stride)
+
   def pair_sym_table_show(self,
         pair_sym_table,
         is_full_connectivity=False,

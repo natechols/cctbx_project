@@ -198,6 +198,68 @@ namespace cctbx { namespace geometry_restraints {
         return result;
       }
 
+      //! Gradients of delta with respect to the four sites.
+      af::tiny<scitbx::vec3<double>, 4>
+      grad_delta() const
+      {
+        af::tiny<scitbx::vec3<double>, 4> result;
+        result[1] = delta_sign * d_02_cross_d_03;
+        result[2] = delta_sign * d_03.cross(d_01);
+        result[3] = delta_sign * d_01.cross(d_02);
+        result[0] = -result[1]-result[2]-result[3];
+        return result;
+      }
+
+      //! Curvatures (diagonal of the 2nd derivative matrix).
+      /*! 2 * weight * (d(delta)/d(x))^2. Since the chiral volume is a
+          determinant, its pure 2nd derivatives are zero and this
+          Gauss-Newton expression is the exact diagonal of the 2nd
+          derivative matrix. The result is never negative and is
+          therefore suitable for preconditioning the LBFGS minimizer.
+       */
+      af::tiny<scitbx::vec3<double>, 4>
+      curvatures() const
+      {
+        af::tiny<scitbx::vec3<double>, 4> result = grad_delta();
+        for (std::size_t i=0; i<4; i++) {
+          result[i] = 2 * weight * result[i].each_mul(result[i]);
+        }
+        return result;
+      }
+
+      //! Support for chirality_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        chirality_proxy::i_seqs_type const& i_seqs) const
+      {
+        add_gauss_newton_curvatures(
+          curvature_array, i_seqs, grad_delta().begin(), 2 * weight);
+      }
+
+      //! Support for chirality_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        uctbx::unit_cell const& unit_cell,
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        chirality_proxy const& proxy) const
+      {
+        optional_container<af::shared<sgtbx::rt_mx> > const&
+          sym_ops = proxy.sym_ops;
+        af::tiny<scitbx::vec3<double>, 4> g = grad_delta();
+        for(int i=0;i<4;i++) {
+          if ( sym_ops.get() != 0 && !sym_ops[i].is_unit_mx() ) {
+            g[i] = r_inv_cart(unit_cell, sym_ops[i]) * g[i];
+          }
+        }
+        add_gauss_newton_curvatures(
+          curvature_array, proxy.i_seqs, g.begin(), 2 * weight);
+      }
+
       //! Support for chirality_residual_sum.
       /*! Not available in Python.
        */
@@ -209,6 +271,28 @@ namespace cctbx { namespace geometry_restraints {
         af::tiny<scitbx::vec3<double>, 4> grads = gradients();
         for(int i=0;i<4;i++) {
           gradient_array[i_seqs[i]] += grads[i];
+        }
+      }
+
+      //! Support for chirality_residual_sum.
+      /*! Not available in Python.
+       */
+      void
+      add_gradients(
+        uctbx::unit_cell const& unit_cell,
+        af::ref<scitbx::vec3<double> > const& gradient_array,
+        chirality_proxy const& proxy) const
+      {
+        chirality_proxy::i_seqs_type const& i_seqs = proxy.i_seqs;
+        optional_container<af::shared<sgtbx::rt_mx> > const&
+          sym_ops = proxy.sym_ops;
+        af::tiny<scitbx::vec3<double>, 4> grads = gradients();
+        for(int i=0;i<4;i++) {
+          if ( sym_ops.get() != 0 && !sym_ops[i].is_unit_mx() ) {
+            gradient_array[i_seqs[i]] +=
+              r_inv_cart(unit_cell, sym_ops[i]) * grads[i];
+          }
+          else { gradient_array[i_seqs[i]] += grads[i]; }
         }
       }
 
@@ -342,6 +426,51 @@ namespace cctbx { namespace geometry_restraints {
   {
     return detail::generic_residual_sum<chirality_proxy, chirality>::get(
       sites_cart, proxies, gradient_array);
+  }
+
+  /*! Fast computation of sum of chirality::residual() and gradients
+      given an array of chirality proxies, taking into account
+      proxy.sym_ops. See other overload.
+   */
+  inline
+  double
+  chirality_residual_sum(
+    uctbx::unit_cell const& unit_cell,
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<chirality_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array)
+  {
+    return detail::generic_residual_sum<chirality_proxy, chirality>::get(
+      unit_cell, sites_cart, proxies, gradient_array);
+  }
+
+  //! See overload.
+  inline
+  double
+  chirality_residual_sum(
+    uctbx::unit_cell const& unit_cell,
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<chirality_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<chirality_proxy, chirality>::get(
+      unit_cell, sites_cart, proxies, gradient_array, curvature_array);
+  }
+
+  /*! The chirality::curvatures() are added to the curvature_array if
+      curvature_array.size() == sites_cart.size(). See other overload.
+   */
+  inline
+  double
+  chirality_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<chirality_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<chirality_proxy, chirality>::get(
+      sites_cart, proxies, gradient_array, curvature_array);
   }
 
 }} // namespace cctbx::geometry_restraints

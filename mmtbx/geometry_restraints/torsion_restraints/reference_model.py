@@ -672,20 +672,29 @@ class reference_model(object):
           proxy_label=proxy_label,
           f=f)
 
-  def target_and_gradients(self, unit_cell, sites_cart, gradient_array):
+  # target_and_gradients accepts curvature_array
+  supports_curvatures = True
+
+  def target_and_gradients(self, unit_cell, sites_cart, gradient_array,
+        curvature_array=None):
     res_sum = 0
+    kwds = {}
+    if (curvature_array is not None):
+      kwds["curvature_array"] = curvature_array
     if self.reference_dihedral_proxies is not None:
       if unit_cell is None:
         res_sum = cctbx.geometry_restraints.dihedral_residual_sum(
             sites_cart=sites_cart,
             proxies=self.reference_dihedral_proxies,
-            gradient_array=gradient_array)
+            gradient_array=gradient_array,
+            **kwds)
       else:
         res_sum = cctbx.geometry_restraints.dihedral_residual_sum(
             unit_cell=unit_cell,
             sites_cart=sites_cart,
             proxies=self.reference_dihedral_proxies,
-            gradient_array=gradient_array)
+            gradient_array=gradient_array,
+            **kwds)
     return res_sum
 
   def get_n_proxies(self):

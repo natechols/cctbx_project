@@ -39,6 +39,8 @@ namespace {
           arg("use_hd"))))
       .def("gradients_iso", &w_t::gradients_iso)
       .def("gradients_aniso_cart", &w_t::gradients_aniso_cart)
+      .def("curvatures_iso", &w_t::curvatures_iso)
+      .def("curvatures_aniso_cart", &w_t::curvatures_aniso_cart)
       .def_readonly("target", &w_t::target)
       .def_readonly("number_of_restraints", &w_t::number_of_restraints)
     ;

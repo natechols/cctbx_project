@@ -21,6 +21,7 @@ sources = [
   "structure_factors_direct.cpp",
   "structure_factors_simple.cpp",
   "curvatures_simple.cpp",
+  "curvatures_random_phase.cpp",
   "targets.cpp",
   "f_model_bpl.cpp",
   "twin_targets.cpp",

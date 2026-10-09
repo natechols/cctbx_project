@@ -3,7 +3,9 @@ from cctbx import xray
 from cctbx import crystal
 from cctbx.array_family import flex
 import scitbx.lbfgs
+from scitbx.lbfgs.curvature_preconditioner import curvature_preconditioner
 from libtbx import adopt_init_args
+from libtbx import group_args
 import math
 import sys
 from libtbx.utils import user_plus_sys_time
@@ -11,6 +13,14 @@ from cctbx import adptbx
 from libtbx.str_utils import format_value
 from libtbx.utils import Sorry
 import mmtbx.refinement.minimization_ncs_constraints
+
+def curvatures_reflection_stride(n_reflections, n_target=5000):
+  """
+  Stride for the direct sums over reflections in
+  cctbx.xray.structure.curvatures_random_phase() (anisotropic scatterers):
+  about n_target reflections are sufficient (~1% error).
+  """
+  return max(1, n_reflections // n_target)
 
 class lbfgs(object):
 
@@ -32,7 +42,30 @@ class lbfgs(object):
                      u_min                    = adptbx.b_as_u(-5.0),
                      u_max                    = adptbx.b_as_u(999.99),
                      collect_monitor          = True,
-                     log                      = None):
+                     log                      = None,
+                     use_curvatures           = False,
+                     curvature_floor_fraction = 0.1,
+                     occupancy_groups         = None,
+                     occupancy_min            = 0.0,
+                     occupancy_max            = 1.0):
+    """
+    occupancy_groups (e.g. from mmtbx.refinement.occupancies.
+    occupancy_selections) are refined simultaneously with the coordinates
+    and/or ADPs: one occupancy per selection, with the selections of a
+    group constrained to sum to 1 (same parameterization as in
+    mmtbx.refinement.occupancies). The occupancies are limited to
+    [occupancy_min, occupancy_max] at the end.
+
+    If use_curvatures is True, the minimizer is preconditioned with
+    approximate curvatures (diagonal of the 2nd derivative matrix): the
+    random-phase approximation for the X-ray target (computed once, see
+    cctbx.xray.structure.curvatures_random_phase()) and the geometry
+    restraints curvatures (see cctbx.geometry_restraints.energies) or the
+    ADP restraints curvatures (see mmtbx.restraints.manager.energies_adp_iso
+    and cctbx.adp_restraints.adp_aniso_restraints). Parameters without
+    curvatures are handled as described in
+    scitbx.lbfgs.curvature_preconditioner.
+    """
     timer = user_plus_sys_time()
     adopt_init_args(self, locals())
     self.f=None
@@ -61,6 +94,20 @@ class lbfgs(object):
     else:
       from mmtbx.refinement import weights
       self.weights = weights.weights(wx = 1, wx_scale = 1, w = 0)
+    # Weight of the ADP restraints. For simultaneous refinement of
+    # coordinates and ADPs the targets of the separate refinements,
+    #   wxc*Exray + wc*Echem  and  wxu*Exray + wu*Eadp,
+    # are combined on the scale of the first:
+    #   wxc*Exray + wc*Echem + wxc/wxu*wu*Eadp
+    self.adp_restraints_weight = self.weights.w
+    if(refine_xyz and refine_adp):
+      if(self.riding_h_manager_is_present()):
+        raise Sorry("Simultaneous refinement of coordinates and ADPs is not"
+          " available with riding hydrogens.")
+      if(target_weights is not None):
+        wa = target_weights.adp_weights_result
+        self.adp_restraints_weight = wa.w * (
+          self.weights.wx * self.weights.wx_scale) / (wa.wx * wa.wx_scale)
     if(self.collect_monitor):
       self.monitor = monitor(
         weights        = self.weights,
@@ -72,9 +119,17 @@ class lbfgs(object):
         refine_occ     = False)
     if(self.collect_monitor): self.monitor.collect()
     self.neutron_refinement = (self.fmodels.fmodel_n is not None)
-    self.x = flex.double(self.xray_structure.n_parameters(), 0)
     self.riding_h_manager = self.model.riding_h_manager
+    self._setup_occupancy_groups()
     self._scatterers_start = self.xray_structure.scatterers()
+    self.curvatures = None
+    if(use_curvatures):
+      if(self.neutron_refinement):
+        raise Sorry("Curvatures are not available for neutron refinement.")
+      self._xray_curvatures = None
+      self.curvature_preconditioner = curvature_preconditioner(
+        floor_fraction = curvature_floor_fraction)
+      self.diag_mode = "always"
     #lbfgs_core_params = scitbx.lbfgs.core_parameters(
     #  stpmin = 1.e-9,
     #  stpmax = adptbx.b_as_u(10))
@@ -87,6 +142,8 @@ class lbfgs(object):
       exception_handling_params = scitbx.lbfgs.exception_handling_parameters(
                          ignore_line_search_failed_step_at_lower_bound = True))
     self.apply_shifts()
+    if(self._occ is not None):
+      self._finalize_occupancies()
     del self._scatterers_start
     self.compute_target(compute_gradients = False,u_iso_refinable_params = None)
     if(self.refine_adp and self.fmodels.fmodel_neutron() is None):
@@ -104,12 +161,140 @@ class lbfgs(object):
        print(file=self.qblib_params.qblib_log)
 # QBLIB END
 
+  def _setup_occupancy_groups(self):
+    """
+    Parameters: [coordinates and/or ADPs as packed by the scatterer flags]
+    followed by the packed group occupancies. The per-atom occupancy
+    gradients (for the atoms in the groups) are computed together with the
+    other gradients and summed for each group.
+    """
+    from mmtbx.refinement import occupancies
+    self._occ = None
+    groups = self.occupancy_groups
+    if(groups is None or len(groups) == 0):
+      self.x = flex.double(self.xray_structure.n_parameters(), 0)
+      return
+    if(self.riding_h_manager is not None):
+      raise Sorry("Simultaneous refinement of occupancies is not available"
+        " with riding hydrogens.")
+    if(self.neutron_refinement):
+      raise Sorry("Simultaneous refinement of occupancies is not available"
+        " for neutron refinement.")
+    scatterers = self.xray_structure.scatterers()
+    n_sc = scatterers.size()
+    i_sel = flex.size_t()
+    for group in groups:
+      for sel in group:
+        i_sel.extend(sel)
+    scatterers.flags_set_grad_occupancy(iselection = i_sel)
+    n_full = self.xray_structure.n_parameters()
+    mask = flex.double(n_full, 0)
+    xray.minimization.add_gradients(
+      scatterers          = scatterers,
+      xray_gradients      = mask,
+      occupancy_gradients = flex.double(n_sc, 1))
+    occ_slots = mask > 0
+    table = []
+    par = flex.double()
+    occ = scatterers.extract_occupancies()
+    sel_bools = []
+    for group in groups:
+      indices = []
+      for sel in group:
+        indices.append(par.size())
+        par.append(flex.mean(occ.select(sel)))
+        sel_bools.append(flex.bool(n_sc, sel))
+      table.append(indices)
+    n_other = occ_slots.count(False)
+    self._occ = group_args(
+      groups      = groups,
+      table       = table,
+      sel_bools   = sel_bools,
+      i_sel       = i_sel,
+      occ_slots   = occ_slots,
+      other_slots = ~occ_slots,
+      # occupancy slots are packed in the order of the atoms
+      occ_atoms   = flex.bool(n_sc, i_sel).iselection(),
+      n_full      = n_full,
+      n_other     = n_other,
+      i_other     = flex.size_t(range(n_other)))
+    self.x = flex.double(n_other, 0)
+    self.x.extend(occupancies.pack_unpack(x = par, table = table))
+
+  def _group_occupancies(self):
+    from mmtbx.refinement import occupancies
+    o = self._occ
+    return occupancies.pack_unpack(
+      x = self.x[o.n_other:], table = o.table)
+
+  def _to_parameters(self, full, curvatures=False):
+    """Per-atom packed gradients or curvatures -> parameters."""
+    from mmtbx.refinement import occupancies
+    o = self._occ
+    per_atom = flex.double(self.xray_structure.scatterers().size(), 0)
+    per_atom.set_selected(o.occ_atoms, full.select(o.occ_slots))
+    group_values = flex.double([flex.sum(per_atom.select(sel_bool))
+      for sel_bool in o.sel_bools])
+    if(curvatures):
+      packed = occupancies.pack_curvatures(x = group_values, table = o.table)
+    else:
+      packed = occupancies.pack_gradients(x = group_values, table = o.table)
+    result = full.select(o.other_slots)
+    result.extend(packed)
+    return result
+
+  def _finalize_occupancies(self):
+    from mmtbx.refinement import occupancies
+    o = self._occ
+    occupancies.set_refinable_parameters(
+      xray_structure     = self.xray_structure,
+      parameters         = self._group_occupancies(),
+      selections         = o.groups,
+      enforce_positivity = (self.occupancy_min >= 0))
+    self.xray_structure.adjust_occupancy(
+      occ_max   = self.occupancy_max,
+      occ_min   = self.occupancy_min,
+      selection = o.i_sel)
+
+  def riding_h_manager_is_present(self):
+    return (self.model is not None and
+            getattr(self.model, "riding_h_manager", None) is not None)
+
+  def u_iso_parameter_selection(self):
+    """Positions of the u_iso parameters in self.x."""
+    scatterers = self.xray_structure.scatterers()
+    mask = flex.double(self.xray_structure.n_parameters(), 0)
+    xray.minimization.add_gradients(
+      scatterers      = scatterers,
+      xray_gradients  = mask,
+      u_iso_gradients = flex.double(scatterers.size(), 1))
+    return mask > 0
+
   def apply_shifts(self):
-    if(self.refine_adp):
+    o = self._occ
+    if(o is None):
+      shifts = self.x
+    else:
+      # per-atom shifts; the occupancies are set from the group parameters
+      shifts = flex.double(o.n_full, 0)
+      shifts.set_selected(o.other_slots, self.x[:o.n_other])
+    if(self.refine_adp and not self.refine_xyz):
       xray.ext.truncate_shifts(
-        shifts    = self.x,
+        shifts    = shifts,
         min_value = self.u_min,
         max_value = self.u_max)
+    elif(self.refine_adp):
+      # coordinate shifts must not be truncated
+      if(getattr(self, "_u_iso_sel", None) is None):
+        self._u_iso_sel = self.u_iso_parameter_selection()
+      u_shifts = shifts.select(self._u_iso_sel)
+      xray.ext.truncate_shifts(
+        shifts    = u_shifts,
+        min_value = self.u_min,
+        max_value = self.u_max)
+      shifts.set_selected(self._u_iso_sel, u_shifts)
+    if(o is not None):
+      self.x.set_selected(o.i_other, shifts.select(o.other_slots))
     if(self.riding_h_manager is not None and self.refine_xyz):
       # temporary array with zero shifts for all atoms
       tmp = flex.vec3_double(self._scatterers_start.size(), [0,0,0])
@@ -133,7 +318,7 @@ class lbfgs(object):
     apply_shifts_result = xray.ext.minimization_apply_shifts(
       unit_cell      = self.xray_structure.unit_cell(),
       scatterers     = self._scatterers_start,
-      shifts         = self.x)
+      shifts         = shifts)
     scatterers_shifted = apply_shifts_result.shifted_scatterers
     if(self.refine_xyz):
       site_symmetry_table = self.xray_structure.site_symmetry_table()
@@ -148,6 +333,9 @@ class lbfgs(object):
         except Exception as e:
           print(str(e), file=self.log)
     self.xray_structure.replace_scatterers(scatterers = scatterers_shifted)
+    if(o is not None):
+      for value, sel_bool in zip(self._group_occupancies(), o.sel_bools):
+        self.xray_structure.set_occupancies(value, sel_bool)
     #
     if(self.riding_h_manager is not None and self.refine_xyz):
       sites_cart = self.xray_structure.sites_cart()
@@ -161,7 +349,41 @@ class lbfgs(object):
     else:
       return None
 
-  def compute_target(self, compute_gradients, u_iso_refinable_params):
+  def xray_curvatures(self):
+    """
+    Approximate curvatures of the weighted X-ray target, packed like the
+    parameters. Computed once: they do not depend on the coordinates.
+    """
+    if(self._xray_curvatures is None):
+      xrs = self.xray_structure
+      tr = self.fmodels.target_functor_xray(compute_gradients = False)
+      indices = self.fmodels.fmodel_xray().f_obs_work().indices()
+      rp = xrs.curvatures_random_phase(
+        miller_indices    = indices,
+        target_curvatures = tr.curvatures_work(),
+        reflection_stride = curvatures_reflection_stride(indices.size()))
+      u_iso = rp.u_iso
+      both = xrs.use_u_iso() & xrs.use_u_aniso()
+      if(both.count(True) > 0):
+        # atoms with isotropic and anisotropic contributions (e.g. TLS): the
+        # u_iso curvatures from the diagonal U_cart curvatures, for
+        # isotropically distributed reflections c(U_kk) = c(u_iso)/5
+        u_iso = u_iso.deep_copy()
+        u_iso.set_selected(both, flex.double([(5/3) * (u[0] + u[1] + u[2])
+          for u in rp.u_cart.select(both)]))
+      result = flex.double(xrs.n_parameters(), 0)
+      xray.minimization.add_gradients(
+        scatterers          = xrs.scatterers(),
+        xray_gradients      = result,
+        site_gradients      = rp.sites_cart,
+        u_iso_gradients     = u_iso,
+        u_aniso_gradients   = rp.u_cart,
+        occupancy_gradients = rp.occupancy)
+      self._xray_curvatures = result * (self.weights.wx*self.weights.wx_scale)
+    return self._xray_curvatures
+
+  def compute_target(self, compute_gradients, u_iso_refinable_params,
+                     compute_curvatures = False):
     self.stereochemistry_residuals = None
     self.fmodels.update_xray_structure(
       xray_structure = self.xray_structure,
@@ -172,11 +394,14 @@ class lbfgs(object):
       u_iso_refinable_params = u_iso_refinable_params)
     self.f = fmodels_target_and_gradients.target()
     self.g = fmodels_target_and_gradients.gradients()
+    if(compute_curvatures):
+      self.curvatures = self.xray_curvatures().deep_copy()
     if(self.refine_xyz and self.restraints_manager is not None and
        self.weights.w > 0.0):
       self.stereochemistry_residuals = \
         self.model.restraints_manager_energies_sites(
-          compute_gradients = compute_gradients)
+          compute_gradients  = compute_gradients,
+          compute_curvatures = compute_curvatures)
 # QBLIB INSERT
       if(self.qblib_params is not None and self.qblib_params.qblib):
         from qbpy import qb_refinement
@@ -231,9 +456,21 @@ class lbfgs(object):
           scatterers     = self.xray_structure.scatterers(),
           xray_gradients = self.g,
           site_gradients = sgc*self.weights.w)
+      if(compute_curvatures and
+         self.stereochemistry_residuals.curvatures is not None):
+        scc = self.stereochemistry_residuals.curvatures.deep_copy()
+        if self.model is not None and self.model.ias_manager is not None:
+          ias_selection = self.model.ias_manager.get_ias_selection()
+          if ias_selection is not None and ias_selection.count(True) > 0:
+            scc.extend(flex.vec3_double(ias_selection.count(True),[0,0,0]))
+        xray.minimization.add_gradients(
+          scatterers     = self.xray_structure.scatterers(),
+          xray_gradients = self.curvatures,
+          site_gradients = scc*self.weights.w)
     if(self.refine_adp and self.restraints_manager is not None and
        self.restraints_manager.geometry is not None
-       and self.weights.w > 0.0 and self.iso_restraints is not None):
+       and self.adp_restraints_weight > 0.0
+       and self.iso_restraints is not None):
       use_hd = False
       if(self.fmodels.fmodel_n is not None or
          (self.is_neutron_scat_table is not None and
@@ -241,20 +478,36 @@ class lbfgs(object):
          self.h_params.refine == "individual"):
         use_hd = True
       energies_adp = self.model.energies_adp(
-        iso_restraints    = self.iso_restraints,
-        use_hd            = use_hd,
-        compute_gradients = compute_gradients)
-      self.f += energies_adp.target * self.weights.w
+        iso_restraints     = self.iso_restraints,
+        use_hd             = use_hd,
+        compute_gradients  = compute_gradients,
+        compute_curvatures = compute_curvatures)
+      self.f += energies_adp.target * self.adp_restraints_weight
+      if(compute_curvatures):
+        w_a = self.adp_restraints_weight
+        u_iso_curvatures = energies_adp.u_iso_curvatures
+        if(u_iso_curvatures is not None):
+          u_iso_curvatures = u_iso_curvatures * w_a
+        u_aniso_curvatures = energies_adp.u_aniso_curvatures
+        if(u_aniso_curvatures is not None):
+          u_aniso_curvatures = u_aniso_curvatures.deep_copy()
+          u_aniso_curvatures *= w_a
+        xray.minimization.add_gradients(
+          scatterers        = self.xray_structure.scatterers(),
+          xray_gradients    = self.curvatures,
+          u_iso_gradients   = u_iso_curvatures,
+          u_aniso_gradients = u_aniso_curvatures)
       if(compute_gradients):
         if(energies_adp.u_aniso_gradients is None):
           xray.minimization.add_gradients(
             scatterers      = self.xray_structure.scatterers(),
             xray_gradients  = self.g,
-            u_iso_gradients = energies_adp.u_iso_gradients * self.weights.w)
+            u_iso_gradients = energies_adp.u_iso_gradients
+                            * self.adp_restraints_weight)
         else:
-          energies_adp.u_aniso_gradients *= self.weights.w
+          energies_adp.u_aniso_gradients *= self.adp_restraints_weight
           if(energies_adp.u_iso_gradients is not None):
-            energies_adp.u_iso_gradients *= self.weights.w
+            energies_adp.u_iso_gradients *= self.adp_restraints_weight
           xray.minimization.add_gradients(
             scatterers        = self.xray_structure.scatterers(),
             xray_gradients    = self.g,
@@ -262,20 +515,37 @@ class lbfgs(object):
             u_iso_gradients   = energies_adp.u_iso_gradients)
           energies_adp.u_aniso_gradients = None # just for safety
           energies_adp.u_iso_gradients = None
+    if(self._occ is not None):
+      if(compute_gradients):
+        self.g = self._to_parameters(self.g)
+      if(compute_curvatures):
+        self.curvatures = self._to_parameters(self.curvatures,
+          curvatures = True)
 
   def callback_after_step(self, minimizer):
     if (self.verbose > 0):
       print("refinement.minimization step: f,iter,nfun:", end=' ')
       print(self.f,minimizer.iter(),minimizer.nfun())
 
-  def compute_functional_and_gradients(self):
+  def compute_functional_and_gradients(self, compute_curvatures = False):
     u_iso_refinable_params = self.apply_shifts()
     self.compute_target(compute_gradients     = True,
-                        u_iso_refinable_params = u_iso_refinable_params)
+                        u_iso_refinable_params = u_iso_refinable_params,
+                        compute_curvatures     = compute_curvatures)
     if (self.verbose > 1):
       print("xray.minimization line search: f,rms(g):", end=' ')
       print(self.f, math.sqrt(flex.mean_sq(self.g)))
     return self.f, self.g
+
+  def compute_functional_gradients_diag(self):
+    """
+    Called by scitbx.lbfgs.run() if self.diag_mode is not None.
+    Returns the diagonal of the inverse Hessian approximation Hk0.
+    """
+    def compute():
+      f, g = self.compute_functional_and_gradients(compute_curvatures = True)
+      return f, g, self.curvatures
+    return self.curvature_preconditioner(self.x, compute)
 
 class monitor(object):
   def __init__(self, weights,

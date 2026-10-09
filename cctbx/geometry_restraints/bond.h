@@ -409,6 +409,38 @@ namespace cctbx { namespace geometry_restraints {
         return result;
       }
 
+      //! Second derivative of the residual with respect to delta.
+      /*! Clamped to be non-negative (relevant only for top_out).
+          Not available in Python.
+       */
+      double
+      d2_residual_d_delta2(double epsilon=1.e-100) const
+      {
+        if (distance_model < epsilon) return 0;
+        if (delta >= -slack && delta <= slack) return 0;
+        if ((top_out) && (delta_slack < 0)) {
+          double top = weight * limit * limit;
+          double x = weight * delta_slack * delta_slack / top;
+          return std::max(0., 2 * weight * std::exp(-x) * (1 - 2 * x));
+        }
+        return 2 * weight;
+      }
+
+      //! Approximate curvatures (diagonal of the 2nd derivative matrix).
+      /*! Gauss-Newton approximation d2R/d(delta)^2 * (d(delta)/d(x))^2,
+          i.e. the term with the 2nd derivative of the distance is
+          neglected. The result is never negative and is therefore
+          suitable for preconditioning the LBFGS minimizer. The
+          curvatures with respect to sites[0] and sites[1] are identical.
+       */
+      af::tiny<scitbx::vec3<double>, 2>
+      curvatures() const
+      {
+        vec3 u = d_distance_d_site_0();
+        vec3 c0 = d2_residual_d_delta2() * u.each_mul(u);
+        return af::tiny<vec3, 2>(c0, c0);
+      }
+
       //! Support for bond_residual_sum.
       /*! Not available in Python.
        */
@@ -476,6 +508,79 @@ namespace cctbx { namespace geometry_restraints {
         cache.gradients[pair.i_seq] += grad_asu;
         if (pair.j_sym == 0) {
           cache.gradients[pair.j_seq] -= grad_asu;
+        }
+      }
+
+      //! Support for bond_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        bond_simple_proxy::i_seqs_type const& i_seqs) const
+      {
+        if (i_seqs[0] == i_seqs[1]) return; // delta is constant
+        vec3 c0 = curvatures()[0];
+        curvature_array[i_seqs[0]] += c0;
+        curvature_array[i_seqs[1]] += c0;
+      }
+
+      //! Support for bond_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        uctbx::unit_cell const& unit_cell,
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        bond_simple_proxy const& proxy) const
+      {
+        bond_simple_proxy::i_seqs_type const& i_seqs = proxy.i_seqs;
+        double d2r = d2_residual_d_delta2();
+        if (d2r == 0) return;
+        vec3 u0 = d_distance_d_site_0();
+        vec3 u1 = u0;
+        if (proxy.rt_mx_ji && !proxy.rt_mx_ji->is_unit_mx()) {
+          scitbx::mat3<double> m =
+              unit_cell.orthogonalization_matrix()
+            * proxy.rt_mx_ji->r().as_double()
+            * unit_cell.fractionalization_matrix();
+          u1 = u0 * m;
+        }
+        if (i_seqs[0] == i_seqs[1]) {
+          // bond to a symmetry copy of the same site
+          vec3 g = u0 - u1;
+          curvature_array[i_seqs[0]] += d2r * g.each_mul(g);
+          return;
+        }
+        curvature_array[i_seqs[0]] += d2r * u0.each_mul(u0);
+        curvature_array[i_seqs[1]] += d2r * u1.each_mul(u1);
+      }
+
+      //! Support for bond_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        direct_space_asu::asu_mappings<> const& asu_mappings,
+        asu_mapping_index_pair const& pair) const
+      {
+        double d2r = d2_residual_d_delta2();
+        if (d2r == 0) return;
+        vec3 u = d_distance_d_site_0();
+        vec3 u_i_seq = asu_mappings.r_inv_cart(pair.i_seq, 0) * u;
+        if (pair.i_seq == pair.j_seq) {
+          // Bond to a symmetry copy of the same site: both ends move.
+          // The residual is counted with weight 0.5 in each direction.
+          vec3 g = u_i_seq
+                 - asu_mappings.r_inv_cart(pair.j_seq, pair.j_sym) * u;
+          curvature_array[pair.i_seq] += 0.5 * d2r * g.each_mul(g);
+          return;
+        }
+        curvature_array[pair.i_seq] += d2r * u_i_seq.each_mul(u_i_seq);
+        if (pair.j_sym == 0) {
+          vec3 u_j_seq = asu_mappings.r_inv_cart(pair.j_seq, 0) * u;
+          curvature_array[pair.j_seq] += d2r * u_j_seq.each_mul(u_j_seq);
         }
       }
 
@@ -698,6 +803,35 @@ namespace cctbx { namespace geometry_restraints {
       unit_cell, sites_cart, proxies, gradient_array);
   }
 
+  /*! The bond::curvatures() are added to the curvature_array if
+      curvature_array.size() == sites_cart.size(). See other overload.
+   */
+  inline
+  double
+  bond_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<bond_simple_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<bond_simple_proxy, bond>::get(
+      sites_cart, proxies, gradient_array, curvature_array);
+  }
+
+  //! See overload.
+  inline
+  double
+  bond_residual_sum(
+    uctbx::unit_cell const& unit_cell,
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<bond_simple_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<bond_simple_proxy, bond>::get(
+      unit_cell, sites_cart, proxies, gradient_array, curvature_array);
+  }
+
   //! Managed group of bond_simple_proxy and bond_asu_proxy arrays.
   typedef sorted_asu_proxies<bond_simple_proxy, bond_asu_proxy>
     bond_sorted_asu_proxies_base;
@@ -826,7 +960,9 @@ namespace cctbx { namespace geometry_restraints {
       af::const_ref<bond_asu_proxy> const& proxies,
       std::vector<bool> const& sym_active_flags,
       af::ref<scitbx::vec3<double> > const& gradient_array,
-      bool disable_cache=false)
+      bool disable_cache=false,
+      af::ref<scitbx::vec3<double> > const& curvature_array
+        = af::ref<scitbx::vec3<double> >(0, 0))
     {
       double result = 0;
       if (!disable_cache) {
@@ -842,6 +978,12 @@ namespace cctbx { namespace geometry_restraints {
           if (gradient_array.size() != 0) {
             restraint.add_gradients(cache, proxies[i]);
           }
+          // curvatures do not transform like gradients and are
+          // therefore not accumulated in the asu cache
+          if (curvature_array.size() != 0) {
+            restraint.add_curvatures(
+              curvature_array, asu_mappings, proxies[i]);
+          }
         }
         if (gradient_array.size() != 0) {
           cache.add_gradients(gradient_array, asu_mappings);
@@ -854,6 +996,10 @@ namespace cctbx { namespace geometry_restraints {
           else                       result += restraint.residual()*.5;
           if (gradient_array.size() != 0) {
             restraint.add_gradients(gradient_array, asu_mappings, proxies[i]);
+          }
+          if (curvature_array.size() != 0) {
+            restraint.add_curvatures(
+              curvature_array, asu_mappings, proxies[i]);
           }
         }
       }
@@ -896,6 +1042,36 @@ namespace cctbx { namespace geometry_restraints {
         sorted_asu_proxies.asu_active_flags,
         gradient_array,
         disable_cache);
+    }
+    return result;
+  }
+
+  /*! The bond::curvatures() are added to the curvature_array if
+      curvature_array.size() == sites_cart.size(). See other overload.
+   */
+  inline
+  double
+  bond_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    bond_sorted_asu_proxies_base const& sorted_asu_proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array,
+    bool disable_cache=false)
+  {
+    double result = bond_residual_sum(
+      sites_cart,
+      sorted_asu_proxies.simple.const_ref(),
+      gradient_array,
+      curvature_array);
+    if (sorted_asu_proxies.asu.size() > 0) {
+      result += detail::bond_residual_sum(
+        sites_cart,
+        *sorted_asu_proxies.asu_mappings(),
+        sorted_asu_proxies.asu.const_ref(),
+        sorted_asu_proxies.asu_active_flags,
+        gradient_array,
+        disable_cache,
+        curvature_array);
     }
     return result;
   }

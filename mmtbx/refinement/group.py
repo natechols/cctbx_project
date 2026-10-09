@@ -94,7 +94,14 @@ class manager(object):
         refine_occ                  = False,
         log                         = None,
         occupancy_max               = None,
-        occupancy_min               = None):
+        occupancy_min               = None,
+        use_curvatures              = False,
+        curvature_floor_fraction    = 0.1):
+    """
+    If use_curvatures is True, the minimizer is preconditioned with
+    approximate curvatures of the X-ray target with respect to the group
+    parameters (see mmtbx.refinement.group_curvatures).
+    """
     global time_group_py
     #
     tmp = flex.size_t()
@@ -169,7 +176,9 @@ class manager(object):
         max_number_of_iterations    = max_number_of_iterations,
         run_finite_differences_test = run_finite_differences_test,
         restraints_manager          = restraints_manager,
-        restraints_weight           = restraints_weight)
+        restraints_weight           = restraints_weight,
+        use_curvatures              = use_curvatures,
+        curvature_floor_fraction    = curvature_floor_fraction)
       if(minimized is not None):
         par_initial = minimized.par_min
         self.tested += minimized.tested
@@ -261,7 +270,9 @@ class group_minimizer(object):
         max_number_of_iterations,
         run_finite_differences_test = False,
         restraints_weight = None,
-        restraints_manager = None):
+        restraints_manager = None,
+        use_curvatures = False,
+        curvature_floor_fraction = 0.1):
     adopt_init_args(self, locals())
     self.target_functor = fmodel.target_functor()
     self.target_functor.prepare_for_minimization()
@@ -288,6 +299,14 @@ class group_minimizer(object):
     if(run_finite_differences_test):
       self.buffer_ana = flex.double()
       self.buffer_fin = flex.double()
+    self.curvatures = None
+    if(use_curvatures):
+      self.curvatures = self.get_curvatures()
+      from scitbx.lbfgs.curvature_preconditioner import \
+        curvature_preconditioner
+      self.curvature_preconditioner = curvature_preconditioner(
+        floor_fraction = curvature_floor_fraction)
+      self.diag_mode = "always"
     self.minimizer = lbfgs.run(
       target_evaluator = self,
       termination_params = lbfgs.termination_parameters(
@@ -306,6 +325,30 @@ class group_minimizer(object):
       s = diff < 1.e-3
       if(s.size()>0 and s.count(True)*100./s.size()>50):
         self.tested += 1
+
+  def get_curvatures(self):
+    """
+    Approximate curvatures of the target with respect to the group
+    parameters (X-ray term only; the restraints contribute zero).
+    """
+    from mmtbx.refinement.group_curvatures import group_curvatures
+    self.apply_shifts(par = self.par_min)
+    self.fmodel.update_xray_structure(update_f_calc=True)
+    gc = group_curvatures(fmodel = self.fmodel)
+    if(self.refine_adp):
+      result = gc.group_u_iso(self.selections)
+    else:
+      result = gc.group_occupancy(self.selections)
+    if(self.weight is not None):
+      result = result * self.weight
+    return result
+
+  def compute_functional_gradients_diag(self):
+    """Called by scitbx.lbfgs.run() if use_curvatures is True."""
+    def compute():
+      f, g = self.compute_functional_and_gradients()
+      return f, g, self.curvatures
+    return self.curvature_preconditioner(self.x, compute)
 
   def get_restraints_tg(self):
     result = None

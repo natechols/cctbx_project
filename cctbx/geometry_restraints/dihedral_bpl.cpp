@@ -176,6 +176,7 @@ namespace {
         .def_readonly("delta", &w_t::delta)
         .def("residual", &w_t::residual)
         .def("gradients", &w_t::gradients, (arg("epsilon")=1e-100))
+        .def("curvatures", &w_t::curvatures, (arg("epsilon")=1e-100))
         .def_pickle(dihedral_wrappers())
         ;
     }
@@ -228,6 +229,25 @@ namespace {
         af::ref<scitbx::vec3<double> > const&))
         dihedral_residual_sum,
       (arg("unit_cell"), arg("sites_cart"), arg("proxies"), arg("gradient_array")));
+    def("dihedral_residual_sum",
+      (double(*)(
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<dihedral_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+        dihedral_residual_sum,
+      (arg("sites_cart"), arg("proxies"), arg("gradient_array"),
+       arg("curvature_array")));
+    def("dihedral_residual_sum",
+      (double(*)(
+        uctbx::unit_cell const&,
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<dihedral_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+        dihedral_residual_sum,
+      (arg("unit_cell"), arg("sites_cart"), arg("proxies"),
+       arg("gradient_array"), arg("curvature_array")));
   }
 
 } // namespace <anonymous>

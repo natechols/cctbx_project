@@ -31,7 +31,15 @@ class energies(scitbx.restraints.energies):
                gradients=None,
                disable_asu_cache=False,
                normalization=False,
-               extension_objects=[]):
+               extension_objects=[],
+               compute_curvatures=False):
+    """
+    If compute_curvatures is True, self.curvatures is a flex.vec3_double
+    with the Gauss-Newton approximation of the diagonal of the 2nd
+    derivative matrix (always >= 0). Currently only the bond, nonbonded,
+    angle, dihedral, chirality and planarity restraints contribute to
+    the curvatures.
+    """
     # runsnaked away...
     #adopt_init_args(self, locals())
     #for local in sorted(locals()):
@@ -75,6 +83,11 @@ class energies(scitbx.restraints.energies):
         self.gradients = flex.vec3_double(sites_cart.size(), [0,0,0])
       else:
         assert self.gradients.size() == sites_cart.size()
+    if (compute_curvatures):
+      self.curvatures = flex.vec3_double(sites_cart.size(), [0,0,0])
+      curvature_kwds = {"curvature_array": self.curvatures}
+    else:
+      curvature_kwds = {}
 
     if (bond_proxies is None):
       self.n_bond_proxies = None
@@ -85,7 +98,8 @@ class energies(scitbx.restraints.energies):
         sites_cart=sites_cart,
         sorted_asu_proxies=bond_proxies,
         gradient_array=self.gradients,
-        disable_cache=disable_asu_cache)
+        disable_cache=disable_asu_cache,
+        **curvature_kwds)
       self.number_of_restraints += self.n_bond_proxies
       self.residual_sum += self.bond_residual_sum
     if (nonbonded_proxies is None):
@@ -98,7 +112,8 @@ class energies(scitbx.restraints.energies):
         sorted_asu_proxies=nonbonded_proxies,
         gradient_array=self.gradients,
         function=nonbonded_function,
-        disable_cache=False)
+        disable_cache=False,
+        **curvature_kwds)
       self.number_of_restraints += self.n_nonbonded_proxies
       self.residual_sum += self.nonbonded_residual_sum
 
@@ -117,17 +132,22 @@ class energies(scitbx.restraints.energies):
       if proxies is not None:
         n_proxies = proxies.size()
         # setattr(self, "n_%s_proxies" % name, proxies.size())
+        kwds = {}
+        if (name in ["angle", "dihedral", "planarity"]):
+          kwds = curvature_kwds
         if unit_cell is None:
           res_sum = residual_sum_function(
               sites_cart=sites_cart,
               proxies=proxies,
-              gradient_array=self.gradients)
+              gradient_array=self.gradients,
+              **kwds)
         else:
           res_sum = residual_sum_function(
               unit_cell=unit_cell,
               sites_cart=sites_cart,
               proxies=proxies,
-              gradient_array=self.gradients)
+              gradient_array=self.gradients,
+              **kwds)
         self.number_of_restraints += n_proxies
         self.residual_sum += res_sum
         setattr(self, "n_%s_proxies" % name, n_proxies)
@@ -145,10 +165,14 @@ class energies(scitbx.restraints.energies):
       setattr(self, "%s_residual_sum" % name, 0)
       if manager is not None:
         n_proxies = manager.get_n_proxies()
+        kwds = {}
+        if (getattr(manager, "supports_curvatures", False)):
+          kwds = curvature_kwds
         res_sum = manager.target_and_gradients(
             unit_cell=unit_cell,
             sites_cart=sites_cart,
-            gradient_array=self.gradients)
+            gradient_array=self.gradients,
+            **kwds)
         self.number_of_restraints += n_proxies
         self.residual_sum += res_sum
         setattr(self, "n_%s_proxies" % name, n_proxies)
@@ -168,7 +192,8 @@ class energies(scitbx.restraints.energies):
           ext.reference_coordinate_residual_sum(
               sites_cart=sites_cart,
               proxies=reference_coordinate_proxies,
-              gradient_array=self.gradients)
+              gradient_array=self.gradients,
+              **curvature_kwds)
       self.number_of_restraints += self.n_reference_coordinate_proxies
       self.residual_sum += self.reference_coordinate_residual_sum
 
@@ -180,7 +205,8 @@ class energies(scitbx.restraints.energies):
       self.chirality_residual_sum = geometry_restraints.chirality_residual_sum(
         sites_cart=sites_cart,
         proxies=self.chirality_proxies,
-        gradient_array=self.gradients)
+        gradient_array=self.gradients,
+        **curvature_kwds)
       self.number_of_restraints += self.n_chirality_proxies
       self.residual_sum += self.chirality_residual_sum
 

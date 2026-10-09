@@ -35,6 +35,9 @@ namespace cctbx { namespace adp_restraints {
       unsigned number_of_restraints;
       af::shared<double> gradients_iso_;
       af::shared<scitbx::sym_mat3<double> > gradients_aniso_cart_;
+      // Diagonal of the 2nd derivatives (exact: the target is quadratic).
+      af::shared<double> curvatures_iso_;
+      af::shared<scitbx::sym_mat3<double> > curvatures_aniso_cart_;
 
       eval_adp_aniso_restraints (
         af::const_ref<scatterer<> > const& scatterers,
@@ -49,7 +52,9 @@ namespace cctbx { namespace adp_restraints {
         target(0.0),
         number_of_restraints(0),
         gradients_aniso_cart_(scatterers.size(), scitbx::sym_mat3<double>(0,0,0,0,0,0)),
-        gradients_iso_(scatterers.size(), 0.0)
+        gradients_iso_(scatterers.size(), 0.0),
+        curvatures_iso_(scatterers.size(), 0.0),
+        curvatures_aniso_cart_(scatterers.size(), scitbx::sym_mat3<double>(0,0,0,0,0,0))
       {
         unsigned n_proxies = bond_proxies.size();
         for (unsigned k = 0; k < n_proxies; k++) {
@@ -77,6 +82,10 @@ namespace cctbx { namespace adp_restraints {
                 target += diff * diff;
                 if (fl_i.grad_u_aniso()) g_i[i_seq] +=  2.0 * diff;
                 if (fl_j.grad_u_aniso()) g_j[i_seq] += -2.0 * diff;
+                if (i != j) {
+                  if (fl_i.grad_u_aniso()) curvatures_aniso_cart_[i][i_seq] += 2;
+                  if (fl_j.grad_u_aniso()) curvatures_aniso_cart_[j][i_seq] += 2;
+                }
                 number_of_restraints++;
               }
             } else if ((fl_i.use_u_iso()) && (fl_j.use_u_iso())) {
@@ -86,6 +95,10 @@ namespace cctbx { namespace adp_restraints {
               target += diff * diff;
               if (fl_i.grad_u_iso()) gradients_iso_[i] +=  2.0 * diff;
               if (fl_j.grad_u_iso()) gradients_iso_[j] += -2.0 * diff;
+              if (i != j) {
+                if (fl_i.grad_u_iso()) curvatures_iso_[i] += 2;
+                if (fl_j.grad_u_iso()) curvatures_iso_[j] += 2;
+              }
               number_of_restraints++;
             } else if ((fl_i.use_u_aniso()) && (fl_j.use_u_iso())) {
               scitbx::sym_mat3<double> u_i = u_cart[i];
@@ -98,10 +111,12 @@ namespace cctbx { namespace adp_restraints {
                 target += diff * diff;
                 if (fl_i.grad_u_aniso()) g_i[i_seq] +=  2.0 * diff;
                 if (fl_j.grad_u_iso())   g_j[i_seq] += -2.0 * diff;
+                if (fl_i.grad_u_aniso()) curvatures_aniso_cart_[i][i_seq] += 2;
                 number_of_restraints++;
               }
               if (fl_j.grad_u_iso()) {
                 gradients_iso_[j] += (g_j[0] + g_j[1] + g_j[2]);
+                curvatures_iso_[j] += 6;
               }
             } else if ((fl_i.use_u_iso()) && (fl_j.use_u_aniso())) {
               double u_i = u_iso[i];
@@ -114,10 +129,12 @@ namespace cctbx { namespace adp_restraints {
                 target += diff * diff;
                 if (fl_i.grad_u_iso())   g_i[i_seq] +=  2.0 * diff;
                 if (fl_j.grad_u_aniso()) g_j[i_seq] += -2.0 * diff;
+                if (fl_j.grad_u_aniso()) curvatures_aniso_cart_[j][i_seq] += 2;
                 number_of_restraints++;
               }
               if (fl_i.grad_u_iso()) {
                 gradients_iso_[i] += (g_i[0] + g_i[1] + g_i[2]);
+                curvatures_iso_[i] += 6;
               }
             }
           }
@@ -132,6 +149,18 @@ namespace cctbx { namespace adp_restraints {
       af::shared<scitbx::sym_mat3<double> > gradients_aniso_cart ()
       {
         return gradients_aniso_cart_;
+      }
+
+      //! Diagonal of the 2nd derivatives with respect to u_iso.
+      af::shared<double> curvatures_iso ()
+      {
+        return curvatures_iso_;
+      }
+
+      //! Diagonal of the 2nd derivatives with respect to u_cart.
+      af::shared<scitbx::sym_mat3<double> > curvatures_aniso_cart ()
+      {
+        return curvatures_aniso_cart_;
       }
   };
 }}

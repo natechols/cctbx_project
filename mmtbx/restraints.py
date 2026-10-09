@@ -108,11 +108,16 @@ class manager(object):
         force_restraints_model=False,
         disable_asu_cache=False,
         hd_selection=None,
+        compute_curvatures=False,
         ):
     """
     Compute energies for coordinates.  Originally this just used the standard
     geometry restraints from the monomer library, but it has since been
     extended to optionally incorporate a variety of external energy functions.
+
+    If compute_curvatures is True, result.curvatures contains approximate
+    curvatures of the geometry restraints (see
+    cctbx.geometry_restraints.energies), if available.
 
     :returns: scitbx.restraints.energies object
     """
@@ -122,6 +127,8 @@ class manager(object):
       gradients_size=sites_cart.size(),
       gradients_factory=flex.vec3_double,
       normalization=self.normalization)
+    if (compute_curvatures):
+      result.curvatures = flex.vec3_double(sites_cart.size(), (0,0,0))
     if (self.geometry is None):
       result.geometry = None
     else:
@@ -155,6 +162,8 @@ class manager(object):
         result.target = result.residual_sum
         result.afitt_energy=result.residual_sum
       else :
+        kwds = {}
+        if (compute_curvatures): kwds["compute_curvatures"] = True
         result.geometry = self.geometry.energies_sites(
           sites_cart=sites_cart,
           flags=geometry_flags,
@@ -163,7 +172,8 @@ class manager(object):
           compute_gradients=compute_gradients,
           gradients=result.gradients,
           disable_asu_cache=disable_asu_cache,
-          normalization=False)
+          normalization=False,
+          **kwds)
       result += result.geometry
     if (self.cartesian_ncs_manager is None):
       result.cartesian_ncs_manager = None
@@ -172,7 +182,8 @@ class manager(object):
         sites_cart=sites_cart,
         compute_gradients=compute_gradients,
         gradients=result.gradients,
-        normalization=False)
+        normalization=False,
+        compute_curvatures=compute_curvatures)
       result += result.cartesian_ncs_manager
     result.finalize_target_and_gradients()
     return result
@@ -186,10 +197,12 @@ class manager(object):
         compute_gradients=False,
         tan_b_iso_max=None,
         u_iso_refinable_params=None,
-        gradients=None):
+        gradients=None,
+        compute_curvatures=False):
     """
     Compute target and gradients for isotropic ADPs/B-factors relative to
-    restraints.
+    restraints. If compute_curvatures is True, result.curvatures contains
+    approximate curvatures (see cctbx.adp_restraints.energies_iso).
 
     :returns: scitbx.restraints.energies object
     """
@@ -199,6 +212,8 @@ class manager(object):
       gradients_size=xray_structure.scatterers().size(),
       gradients_factory=flex.double,
       normalization=self.normalization)
+    if (compute_curvatures):
+      result.curvatures = flex.double(xray_structure.scatterers().size(), 0)
     if (self.geometry is None):
       result.geometry = None
     else:
@@ -210,7 +225,8 @@ class manager(object):
         use_hd = use_hd,
         use_u_local_only=use_u_local_only,
         compute_gradients=compute_gradients,
-        gradients=result.gradients)
+        gradients=result.gradients,
+        compute_curvatures=compute_curvatures)
       result += result.geometry
     if (self.cartesian_ncs_manager is None):
       result.cartesian_ncs_manager = None
@@ -219,7 +235,8 @@ class manager(object):
         u_isos=xray_structure.extract_u_iso_or_u_equiv(),
         average_power=parameters.average_power,
         compute_gradients=compute_gradients,
-        gradients=result.gradients)
+        gradients=result.gradients,
+        compute_curvatures=compute_curvatures)
       result += result.cartesian_ncs_manager
     result.finalize_target_and_gradients()
     if(compute_gradients):
@@ -234,6 +251,8 @@ class manager(object):
        else:
           chain_rule_scale = 1.0
        result.gradients = result.gradients * chain_rule_scale
+       if (result.curvatures is not None):
+         result.curvatures = result.curvatures * chain_rule_scale**2
     return result
 
   def energies_adp_aniso(self,
@@ -263,6 +282,9 @@ class manager(object):
        result.target *= normalization_scale
        result.gradients_aniso_cart *= normalization_scale
        result.gradients_aniso_star *= normalization_scale
+       result.curvatures_aniso_cart *= normalization_scale
+       if(result.curvatures_iso is not None):
+         result.curvatures_iso *= normalization_scale
        if(result.gradients_iso is not None):
           result.gradients_iso *= normalization_scale
     return result

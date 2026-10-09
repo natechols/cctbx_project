@@ -2,6 +2,7 @@ from __future__ import absolute_import, division, print_function
 from cctbx import crystal
 from cctbx.array_family import flex
 import scitbx.lbfgs
+from scitbx.lbfgs.curvature_preconditioner import curvature_preconditioner
 
 class empty: pass
 
@@ -19,7 +20,17 @@ class lbfgs(object):
       disable_asu_cache=False,
       sites_cart_selection=None,
       site_labels=None,
-      states_collector=None):
+      states_collector=None,
+      use_curvatures=False,
+      curvature_floor_fraction=0.1):
+    """
+    If use_curvatures is True, the LBFGS minimizer is preconditioned with
+    the inverse of the approximate diagonal of the 2nd derivative matrix
+    (see energies(compute_curvatures=True)). Coordinates without curvature
+    information (e.g. atoms restrained only by terms that do not compute
+    curvatures yet) are assigned curvature_floor_fraction times the mean
+    of the positive curvatures. See scitbx.lbfgs.curvature_preconditioner.
+    """
     if (lbfgs_termination_params is None):
       lbfgs_termination_params = scitbx.lbfgs.termination_parameters(
         max_iterations=1000)
@@ -29,6 +40,12 @@ class lbfgs(object):
     self.states_collector = states_collector
     self.tmp = empty()
     self.rmsd_bonds, self.rmsd_angles = None, None
+    self.use_curvatures = use_curvatures
+    if (use_curvatures):
+      self.curvature_preconditioner = curvature_preconditioner(
+        floor_fraction=curvature_floor_fraction)
+      assert riding_h_manager is None # not implemented
+      self.diag_mode = "always"
     if sites_cart_selection:
       self.sites_cart_selection = flex.bool(sites_cart_selection)
       self.tmp.reduced_sites_cart=sites_cart.select(self.sites_cart_selection)
@@ -88,21 +105,27 @@ class lbfgs(object):
           special_op=site_symmetry_table.get(i_seq).special_op(),
           site_cart=self.tmp.sites_shifted[i_seq])
 
-  def compute_target(self, compute_gradients):
+  def compute_target(self, compute_gradients, compute_curvatures=False):
+    kwds = {}
+    if (compute_curvatures):
+      kwds["compute_curvatures"] = True
     self.tmp.target_result = \
       self.tmp.geometry_restraints_manager.energies_sites(
         sites_cart=self.tmp.sites_shifted,
         flags=self.tmp.geometry_restraints_flags,
         compute_gradients=compute_gradients,
         disable_asu_cache=self.tmp.disable_asu_cache,
-        site_labels=self.site_labels)
+        site_labels=self.site_labels,
+        **kwds)
 
-  def compute_functional_and_gradients(self):
+  def compute_functional_and_gradients(self, compute_curvatures=False):
     if (self.first_target_result is None):
       assert self.x.all_eq(0)
     else:
       self.apply_shifts()
-    self.compute_target(compute_gradients=True)
+    self.compute_target(
+      compute_gradients=True,
+      compute_curvatures=compute_curvatures)
     self.f = self.tmp.target_result.target
     if (self.first_target_result is None):
       self.first_target_result = self.tmp.target_result
@@ -118,3 +141,16 @@ class lbfgs(object):
           sites_cart   = self.tmp.sites_shifted,
           hd_selection = self.riding_h_manager.hd_selection)
     return self.f, self.g
+
+  def compute_functional_gradients_diag(self):
+    """
+    Called by scitbx.lbfgs.run() if self.diag_mode is not None.
+    Returns the diagonal of the inverse Hessian approximation Hk0.
+    """
+    def compute():
+      f, g = self.compute_functional_and_gradients(compute_curvatures=True)
+      c = self.tmp.target_result.curvatures
+      if self.sites_cart_selection:
+        c = c.select(self.sites_cart_selection)
+      return f, g, c.as_double()
+    return self.curvature_preconditioner(self.x, compute)

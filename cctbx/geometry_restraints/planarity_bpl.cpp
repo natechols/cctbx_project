@@ -128,6 +128,7 @@ namespace {
         .def("rms_deltas", &w_t::rms_deltas)
         .def("residual", &w_t::residual)
         .def("gradients", &w_t::gradients)
+        .def("curvatures", &w_t::curvatures)
         .def("normal", &w_t::normal)
         .def("lambda_min", &w_t::lambda_min)
         .def("center_of_mass", &w_t::center_of_mass, ccr())
@@ -186,6 +187,25 @@ namespace {
         af::ref<scitbx::vec3<double> > const&))
       planarity_residual_sum,
       (arg("unit_cell"), arg("sites_cart"), arg("proxies"), arg("gradient_array")));
+    def("planarity_residual_sum",
+      (double(*)(
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<planarity_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+        planarity_residual_sum,
+      (arg("sites_cart"), arg("proxies"), arg("gradient_array"),
+       arg("curvature_array")));
+    def("planarity_residual_sum",
+      (double(*)(
+        uctbx::unit_cell const&,
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<planarity_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+        planarity_residual_sum,
+      (arg("unit_cell"), arg("sites_cart"), arg("proxies"),
+       arg("gradient_array"), arg("curvature_array")));
   }
 
 } // namespace <anonymous>

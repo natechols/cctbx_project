@@ -33,6 +33,9 @@ class energies(object):
         O.gradients = gradients
     O.normalization = normalization
     O.normalization_factor = None
+    # Optional approximate diagonal of the 2nd derivative matrix, same
+    # layout as gradients (allocated by subclasses that support it).
+    O.curvatures = None
 
   def __iadd__(O, rhs):
     O.number_of_restraints += rhs.number_of_restraints
@@ -41,6 +44,10 @@ class energies(object):
       assert rhs.gradients is not None
       if (O.gradients.id() != rhs.gradients.id()):
         O.gradients += rhs.gradients
+    # terms without curvatures contribute zero
+    if (O.curvatures is not None and rhs.curvatures is not None):
+      if (O.curvatures.id() != rhs.curvatures.id()):
+        O.curvatures += rhs.curvatures
     return O
 
   def __setattr1__(self, attr, value):
@@ -56,3 +63,5 @@ class energies(object):
       O.target *= O.normalization_factor
       if (O.gradients is not None):
         O.gradients *= O.normalization_factor
+      if (O.curvatures is not None):
+        O.curvatures *= O.normalization_factor

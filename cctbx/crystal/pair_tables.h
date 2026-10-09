@@ -69,7 +69,8 @@ namespace cctbx { namespace crystal {
         double average_power,
         double min_u_sum,
         bool compute_gradients,
-        bool collect)
+        bool collect,
+        bool compute_curvatures=false)
       {
         CCTBX_ASSERT(sites_frac.size() == pair_sym_table.size());
         CCTBX_ASSERT(u_isos.size() == pair_sym_table.size());
@@ -80,6 +81,9 @@ namespace cctbx { namespace crystal {
         residual_sum = 0;
         if (compute_gradients) {
           gradients.resize(u_isos.size());
+        }
+        if (compute_curvatures) {
+          curvatures.resize(u_isos.size());
         }
         for(unsigned i_seq=0;i_seq<pair_sym_table.size();i_seq++) {
           if(use_u_iso[i_seq] && selection[i_seq]) {
@@ -122,6 +126,15 @@ namespace cctbx { namespace crystal {
                          gradients[i_seq] += weight * (mem1 - mem2);
                          gradients[j_seq] += weight * (-mem1 - mem2);
                        }
+                       // Gauss-Newton curvatures: the residual is
+                       // weight * r^2 with r = u_diff / ave_pow^(1/2)
+                       if (compute_curvatures && grad_u_iso[i_seq] &&
+                           grad_u_iso[j_seq] && i_seq != j_seq) {
+                         double t = average_power * u_diff / (2 * sum);
+                         double c = 2 * weight / ave_pow;
+                         curvatures[i_seq] += c * (1 - t) * (1 - t);
+                         curvatures[j_seq] += c * (1 + t) * (1 + t);
+                       }
                        if (collect) {
                          u_i.push_back(u1);
                          u_j.push_back(u2);
@@ -139,6 +152,8 @@ namespace cctbx { namespace crystal {
       unsigned number_of_restraints;
       double residual_sum;
       af::shared<double> gradients;
+      //! Gauss-Newton approximation of the diagonal of the 2nd derivatives.
+      af::shared<double> curvatures;
       af::shared<double> u_i;
       af::shared<double> u_j;
       af::shared<double> r_ij;

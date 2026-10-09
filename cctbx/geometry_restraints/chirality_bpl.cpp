@@ -148,6 +148,7 @@ namespace {
         .def_readonly("delta", &w_t::delta)
         .def("residual", &w_t::residual)
         .def("gradients", &w_t::gradients)
+        .def("curvatures", &w_t::curvatures)
         .def_pickle(chirality_wrappers())
         ;
     }
@@ -200,6 +201,25 @@ namespace {
         af::ref<scitbx::vec3<double> > const&))
         chirality_residual_sum,
       (arg("unit_cell"), arg("sites_cart"), arg("proxies"), arg("gradient_array")));
+    def("chirality_residual_sum",
+      (double(*)(
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<chirality_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+        chirality_residual_sum,
+      (arg("sites_cart"), arg("proxies"), arg("gradient_array"),
+       arg("curvature_array")));
+    def("chirality_residual_sum",
+      (double(*)(
+        uctbx::unit_cell const&,
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<chirality_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+        chirality_residual_sum,
+      (arg("unit_cell"), arg("sites_cart"), arg("proxies"),
+       arg("gradient_array"), arg("curvature_array")));
   }
 
 } // namespace <anonymous>

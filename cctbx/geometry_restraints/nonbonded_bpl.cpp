@@ -301,6 +301,7 @@ namespace {
         .def_readonly("delta", &w_t::delta)
         .def("residual", &w_t::residual)
         .def("gradients", &w_t::gradients)
+        .def("curvatures", &w_t::curvatures)
         .def_pickle(nonbonded_wrappers())
       ;
     }
@@ -352,6 +353,29 @@ namespace {
           arg("sites_cart"),
           arg("sorted_asu_proxies"),
           arg("gradient_array"),
+          arg("function"),
+          arg("disable_cache")=false));
+    def("nonbonded_residual_sum",
+      (double(*)(
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<nonbonded_simple_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&,
+        NonbondedFunction const& function)) nonbonded_residual_sum,
+      (arg("sites_cart"), arg("proxies"), arg("gradient_array"),
+       arg("curvature_array"), arg("function")));
+    def("nonbonded_residual_sum",
+      (double(*)(
+        af::const_ref<scitbx::vec3<double> > const&,
+        nonbonded_sorted_asu_proxies_base const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&,
+        NonbondedFunction const&,
+        bool)) nonbonded_residual_sum, (
+          arg("sites_cart"),
+          arg("sorted_asu_proxies"),
+          arg("gradient_array"),
+          arg("curvature_array"),
           arg("function"),
           arg("disable_cache")=false));
   }

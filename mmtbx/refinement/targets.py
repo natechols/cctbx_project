@@ -248,7 +248,8 @@ class target_functor(object):
         manager=self.manager,
         core_result=self.core(
           f_calc=self.manager.f_model(),
-          compute_gradients=compute_gradients))
+          compute_gradients=compute_gradients),
+        core=self.core)
     except RuntimeError as e:
       if str(e) == "mli target is not implemented (yet)!":
         raise Sorry("mli target is not implemented (yet). Pick another target.")
@@ -330,9 +331,51 @@ class target_result_mixin(object):
 
 class target_result(target_result_mixin):
 
-  def __init__(self, manager, core_result):
+  def __init__(self, manager, core_result, core=None):
     self.manager = manager
     self.core_result = core_result
+    self.core = core
+
+  def curvatures_work(self):
+    """
+    Non-negative second derivatives of the target with respect to
+    abs(f_calc) for the work reflections: expected (Fisher information)
+    values for the ml target, Gauss-Newton values for least-squares
+    targets (see cctbx/xray/targets/curvatures.h). Intended for
+    preconditioning, e.g. via xray.structure.curvatures_random_phase().
+    Like d_target_d_f_calc_work(), these include the factor
+    (k_anisotropic*k_isotropic)**2 relating f_model to f_calc.
+    """
+    core = self.core
+    f_model = self.manager.f_model()
+    if (isinstance(core, xray.target_functors.max_like)):
+      if (core.experimental_phases is not None or core.spacialization != "f"):
+        raise RuntimeError("curvatures are only available for the ml target")
+      result = xray.targets_mlf_expected_curvatures_work(
+        f_obs=core.f_obs.data(),
+        r_free_flags=core.r_free_flags.data(),
+        f_calc=f_model.data(),
+        alpha=core.alpha_beta[0].data(),
+        beta=core.alpha_beta[1].data(),
+        scale_factor=core.scale_factor,
+        epsilons=core.epsilons,
+        centric_flags=core.centric_flags)
+    elif (isinstance(core, xray.target_functors.least_squares)):
+      assert not core.compute_scale_using_all_data
+      weights = core.weights
+      if (weights is None): weights = flex.double()
+      result = xray.targets_least_squares_curvatures_work(
+        obs_type="F",
+        obs=core.f_obs.data(),
+        weights=weights,
+        r_free_flags=core.r_free_flags.data(),
+        f_calc=f_model.data(),
+        scale_factor=self.core_result.scale_factor())
+    else:
+      raise RuntimeError(
+        "curvatures not available for target %s" % self.manager.target_name)
+    k = self.manager.k_anisotropic_work() * self.manager.k_isotropic_work()
+    return result * k * k
 
   def target_per_reflection(self):
     return self.core_result.target_per_reflection()

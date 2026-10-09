@@ -52,6 +52,14 @@ namespace {
           arg("u_isos"),
           arg("u_average_min"),
           arg("gradients")))
+        .def("adp_iso_residual_sum_and_curvatures",
+          &w_t::adp_iso_residual_sum_and_curvatures, (
+          arg("weight"),
+          arg("average_power"),
+          arg("u_isos"),
+          arg("u_average_min"),
+          arg("gradients"),
+          arg("curvatures")))
         .def_pickle(pair_registry_wrappers())
       ;
       register_ptr_to_python<std::auto_ptr<pair_registry> >();

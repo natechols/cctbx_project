@@ -196,6 +196,7 @@ namespace {
           double,
           double,
           bool,
+          bool,
           bool>((
             arg("pair_sym_table"),
             arg("orthogonalization_matrix"),
@@ -209,10 +210,12 @@ namespace {
             arg("average_power"),
             arg("min_u_sum"),
             arg("compute_gradients"),
-            arg("collect"))))
+            arg("collect"),
+            arg("compute_curvatures")=false)))
         .def_readonly("number_of_restraints", &w_t::number_of_restraints)
         .def_readonly("residual_sum", &w_t::residual_sum)
         .add_property("gradients", make_getter(&w_t::gradients, rbv()))
+        .add_property("curvatures", make_getter(&w_t::curvatures, rbv()))
         .add_property("u_i", make_getter(&w_t::u_i, rbv()))
         .add_property("u_j", make_getter(&w_t::u_j, rbv()))
         .add_property("r_ij", make_getter(&w_t::r_ij, rbv()))

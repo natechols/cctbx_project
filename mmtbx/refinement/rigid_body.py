@@ -2,6 +2,7 @@ from __future__ import absolute_import, division, print_function
 from cctbx.array_family import flex
 from libtbx import adopt_init_args
 import sys
+import math
 from libtbx.test_utils import approx_equal
 from scitbx import matrix
 from scitbx import lbfgs
@@ -238,7 +239,14 @@ class manager(object):
                      t_initial  = None,
                      bss        = None,
                      log        = None,
-                     monitors   = None):
+                     monitors   = None,
+                     use_curvatures           = False,
+                     curvature_floor_fraction = 0.1):
+    """
+    If use_curvatures is True, the minimizer is preconditioned with
+    approximate curvatures of the X-ray target with respect to the
+    rotations and translations (see mmtbx.refinement.group_curvatures).
+    """
     global time_rigid_body_total
     self.params = params
     save_original_target_name = fmodel.target_name
@@ -347,7 +355,9 @@ class manager(object):
               refine_t               = params.refine_translation,
               max_iterations         = params.max_iterations,
               euler_angle_convention = params.euler_angle_convention,
-              lbfgs_maxfev = params.lbfgs_line_search_max_function_evaluations)
+              lbfgs_maxfev = params.lbfgs_line_search_max_function_evaluations,
+              use_curvatures           = use_curvatures,
+              curvature_floor_fraction = curvature_floor_fraction)
             rotation_matrices = []
             translation_vectors = []
             for i in range(len(selections)):
@@ -477,7 +487,9 @@ class rigid_body_minimizer(object):
                refine_t,
                max_iterations,
                euler_angle_convention,
-               lbfgs_maxfev):
+               lbfgs_maxfev,
+               use_curvatures           = False,
+               curvature_floor_fraction = 0.1):
     adopt_init_args(self, locals())
     self.fmodel_copy = self.fmodel.deep_copy()
     self.target_functor = self.fmodel_copy.target_functor()
@@ -499,6 +511,14 @@ class rigid_body_minimizer(object):
         self.t_min[i] = tuple(self.t_min[i])
     self.x = self.pack(self.r_min, self.t_min)
     self.n = self.x.size()
+    self.curvatures = None
+    if(use_curvatures):
+      self.curvatures = self.get_curvatures()
+      from scitbx.lbfgs.curvature_preconditioner import \
+        curvature_preconditioner
+      self.curvature_preconditioner = curvature_preconditioner(
+        floor_fraction = curvature_floor_fraction)
+      self.diag_mode = "always"
     self.minimizer = lbfgs.run(
       target_evaluator = self,
       core_params = lbfgs.core_parameters(
@@ -511,6 +531,36 @@ class rigid_body_minimizer(object):
                      )
     self.compute_functional_and_gradients(suppress_gradients=True)
     del self.x
+
+  def get_curvatures(self):
+    """
+    Approximate curvatures of the X-ray target with respect to the
+    parameters (Euler angles of the rotations about the centers of mass,
+    and translations), packed like the parameters.
+    """
+    from mmtbx.refinement.group_curvatures import group_curvatures
+    gc = group_curvatures(fmodel = self.fmodel_copy)
+    c_r, c_t = [], []
+    for sel, r in zip(self.selections, self.r_min):
+      w = self.atomic_weights.select(sel)
+      center = matrix.col((self.sites_cart.select(sel) * w).sum()) \
+             / flex.sum(w)
+      rot_obj = scitbx.rigid_body.euler(phi = r[0], psi = r[1], the = r[2],
+        convention = self.euler_angle_convention)
+      # derivatives with respect to the angles in degrees
+      r_derivatives = [d * (math.pi/180)
+        for d in [rot_obj.r_phi(), rot_obj.r_psi(), rot_obj.r_the()]]
+      c_r.append(gc.group_rotation(sel, center,
+        axes_derivatives = lambda v: [d * v for d in r_derivatives]))
+      c_t.append(gc.group_translation(sel))
+    return self.pack(c_r, c_t)
+
+  def compute_functional_gradients_diag(self):
+    """Called by scitbx.lbfgs.run() if use_curvatures is True."""
+    def compute():
+      f, g = self.compute_functional_and_gradients()
+      return f, g, self.curvatures
+    return self.curvature_preconditioner(self.x, compute)
 
   def pack(self, r, t):
     v = []
@@ -636,10 +686,13 @@ class target_and_grads(object):
         target_grads_wrt_r = matrix.sqr(
                     sites_cart_cm.transpose_multiply(target_grads_wrt_xyz_sel))
         self.grads_wrt_t.append(flex.double(target_grads_wrt_xyz_sel.sum()))
+        # r_phi() etc. are derivatives with respect to radians; the
+        # parameters are in degrees
         g_phi = (rot_obj.r_phi() * target_grads_wrt_r).trace()
         g_psi = (rot_obj.r_psi() * target_grads_wrt_r).trace()
         g_the = (rot_obj.r_the() * target_grads_wrt_r).trace()
-        self.grads_wrt_r.append(flex.double([g_phi, g_psi, g_the]))
+        self.grads_wrt_r.append(
+          flex.double([g_phi, g_psi, g_the]) * (math.pi/180))
 
   def target(self):
     return self.f

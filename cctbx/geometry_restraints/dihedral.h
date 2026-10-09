@@ -427,6 +427,87 @@ namespace cctbx { namespace geometry_restraints {
         return result;
       }
 
+      //! Second derivative of the residual with respect to delta.
+      /*! delta in degrees. Clamped to be non-negative (relevant for the
+          sinusoidal and top_out functions). Not available in Python.
+       */
+      double
+      d2_residual_d_delta2() const
+      {
+        using scitbx::constants::pi_180;
+        double delta_local = delta;
+        if (slack > 0.0) {
+          if      (delta >  slack) delta_local = delta - slack;
+          else if (delta < -slack) delta_local = delta + slack;
+          else return 0;
+        }
+        if (periodicity > 0) {
+          return std::max(0., 9600. * weight * pi_180 * pi_180
+            * std::cos(periodicity * delta_local * pi_180));
+        }
+        if (top_out && limit >= 0.0) {
+          double top = weight * limit * limit;
+          double x = weight * delta_local * delta_local / top;
+          return std::max(0., 2 * weight * std::exp(-x) * (1 - 2 * x));
+        }
+        return 2 * weight;
+      }
+
+      //! Approximate curvatures (diagonal of the 2nd derivative matrix).
+      /*! Gauss-Newton approximation d2R/d(delta)^2 * (d(delta)/d(x))^2,
+          i.e. the term with the 2nd derivative of the dihedral angle is
+          neglected, and d2R/d(delta)^2 is clamped to be non-negative.
+          The result is never negative and is therefore suitable for
+          preconditioning the LBFGS minimizer.
+       */
+      af::tiny<scitbx::vec3<double>, 4>
+      curvatures(double epsilon=1e-100) const
+      {
+        af::tiny<scitbx::vec3<double>, 4> result = grad_delta(epsilon);
+        double d2r = d2_residual_d_delta2();
+        for (std::size_t i=0; i<4; i++) {
+          result[i] = d2r * result[i].each_mul(result[i]);
+        }
+        return result;
+      }
+
+      //! Support for dihedral_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        dihedral_proxy::i_seqs_type const& i_seqs) const
+      {
+        double d2r = d2_residual_d_delta2();
+        if (d2r == 0) return;
+        add_gauss_newton_curvatures(
+          curvature_array, i_seqs, grad_delta().begin(), d2r);
+      }
+
+      //! Support for dihedral_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        uctbx::unit_cell const& unit_cell,
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        dihedral_proxy const& proxy) const
+      {
+        double d2r = d2_residual_d_delta2();
+        if (d2r == 0) return;
+        optional_container<af::shared<sgtbx::rt_mx> > const&
+          sym_ops = proxy.sym_ops;
+        af::tiny<scitbx::vec3<double>, 4> g = grad_delta();
+        for(int i=0;i<4;i++) {
+          if ( sym_ops.get() != 0 && !sym_ops[i].is_unit_mx() ) {
+            g[i] = r_inv_cart(unit_cell, sym_ops[i]) * g[i];
+          }
+        }
+        add_gauss_newton_curvatures(
+          curvature_array, proxy.i_seqs, g.begin(), d2r);
+      }
+
       //! Support for dihedral_residual_sum.
       /*! Not available in Python.
        */
@@ -461,7 +542,7 @@ namespace cctbx { namespace geometry_restraints {
           if ( sym_ops.get() != 0 && !sym_ops[i].is_unit_mx() ) {
             scitbx::mat3<double>
               r_inv_cart_ = r_inv_cart(unit_cell, sym_ops[i]);
-            gradient_array[i_seqs[i]] += grads[i] * r_inv_cart_;
+            gradient_array[i_seqs[i]] += r_inv_cart_ * grads[i];
           }
           else { gradient_array[i_seqs[i]] += grads[i]; }
         }
@@ -665,6 +746,35 @@ namespace cctbx { namespace geometry_restraints {
   {
     return detail::generic_residual_sum<dihedral_proxy, dihedral>::get(
       unit_cell, sites_cart, proxies, gradient_array);
+  }
+
+  /*! The dihedral::curvatures() are added to the curvature_array if
+      curvature_array.size() == sites_cart.size(). See other overload.
+   */
+  inline
+  double
+  dihedral_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<dihedral_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<dihedral_proxy, dihedral>::get(
+      sites_cart, proxies, gradient_array, curvature_array);
+  }
+
+  //! See overload.
+  inline
+  double
+  dihedral_residual_sum(
+    uctbx::unit_cell const& unit_cell,
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<dihedral_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<dihedral_proxy, dihedral>::get(
+      unit_cell, sites_cart, proxies, gradient_array, curvature_array);
   }
 
 }} // namespace cctbx::geometry_restraints

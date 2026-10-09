@@ -561,7 +561,14 @@ class tls_xray_target_minimizer(object):
                selections_1d,
                max_iterations,
                run_finite_differences_test = False,
-               correct_adp = True):
+               correct_adp = True,
+               use_curvatures = False,
+               curvature_floor_fraction = 0.1):
+    """
+    If use_curvatures is True, the minimizer is preconditioned with
+    approximate curvatures of the X-ray target with respect to the TLS
+    parameters (see mmtbx.refinement.group_curvatures).
+    """
     adopt_init_args(self, locals())
     fmodel.xray_structure.scatterers().flags_set_grads(state=False)
     xray.set_scatterer_grad_flags(scatterers = fmodel.xray_structure.scatterers(),
@@ -588,6 +595,14 @@ class tls_xray_target_minimizer(object):
     self.L_min = self.L_initial
     self.S_min = self.S_initial
     self.x = self.pack(self.T_min, self.L_min, self.S_min)
+    self.curvatures = None
+    if(use_curvatures):
+      self.curvatures = self.get_curvatures()
+      from scitbx.lbfgs.curvature_preconditioner import \
+        curvature_preconditioner
+      self.curvature_preconditioner = curvature_preconditioner(
+        floor_fraction = curvature_floor_fraction)
+      self.diag_mode = "always"
     self.minimizer = lbfgs.run(
       target_evaluator = self,
       core_params = lbfgs.core_parameters(maxfev = 10),
@@ -606,6 +621,51 @@ class tls_xray_target_minimizer(object):
       T              = self.T_min,
       L              = self.L_min,
       S              = self.S_min)
+
+  def get_curvatures(self):
+    """
+    Approximate curvatures of the X-ray target with respect to the TLS
+    parameters, packed like the parameters. The U_cart of the atoms are
+    linear in T, L and S: dU/dp is U for p = 1 and all other parameters 0.
+    """
+    from mmtbx.refinement.group_curvatures import group_curvatures
+    tlsos = generate_tlsos(selections     = self.selections,
+                           xray_structure = self.fmodel_copy.xray_structure,
+                           T              = self.T_min,
+                           L              = self.L_min,
+                           S              = self.S_min)
+    update_xray_structure_with_tls(
+      xray_structure = self.fmodel_copy.xray_structure,
+      selections     = self.selections,
+      selections_1d  = self.selections_1d,
+      tlsos          = tlsos,
+      correct_adp    = self.correct_adp)
+    self.fmodel_copy.update_xray_structure(update_f_calc=True)
+    gc = group_curvatures(fmodel = self.fmodel_copy)
+    sites_cart = self.fmodel_copy.xray_structure.sites_cart()
+    c_T, c_L, c_S = [], [], []
+    for sel, tlso_ in zip(self.selections, tlsos):
+      sel = flex.size_t(sel) if not isinstance(sel, flex.size_t) else sel
+      sites = sites_cart.select(sel)
+      def curvature(t, l, s):
+        d_u = uaniso_from_tls_one_group(
+          tlso = tlso(t = t, l = l, s = s, origin = tlso_.origin),
+          sites_cart = sites, zeroize_trace = True)
+        return gc.group_u_cart(sel, d_u)
+      def unit(n, i):
+        v = [0]*n; v[i] = 1
+        return v
+      c_T.append([curvature(unit(6, i), [0]*6, [0]*9) for i in range(6)])
+      c_L.append([curvature([0]*6, unit(6, i), [0]*9) for i in range(6)])
+      c_S.append([curvature([0]*6, [0]*6, unit(9, i)) for i in range(9)])
+    return self.pack(c_T, c_L, c_S)
+
+  def compute_functional_gradients_diag(self):
+    """Called by scitbx.lbfgs.run() if use_curvatures is True."""
+    def compute():
+      f, g = self.compute_functional_and_gradients()
+      return f, g, self.curvatures
+    return self.curvature_preconditioner(self.x, compute)
 
   def pack(self, T, L, S):
     v = []
@@ -857,7 +917,9 @@ class tls_refinement(object):
                eps = 1.e-6,
                out = None,
                macro_cycle = None,
-               verbose = True):
+               verbose = True,
+               use_curvatures = False,
+               curvature_floor_fraction = 0.1):
     global time_tls_total
     timer = user_plus_sys_time()
     if(out is None): out = sys.stdout
@@ -895,7 +957,9 @@ class tls_refinement(object):
         selections                  = selections,
         selections_1d               = selections_1d,
         max_iterations              = max_number_of_iterations,
-        run_finite_differences_test = run_finite_differences_test)
+        run_finite_differences_test = run_finite_differences_test,
+        use_curvatures              = use_curvatures,
+        curvature_floor_fraction    = curvature_floor_fraction)
       xrs = minimized.fmodel_copy.xray_structure
       xrs.show_u_statistics(text = prefix, out  = out)
       if(verbose):

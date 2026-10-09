@@ -335,6 +335,31 @@ namespace cctbx { namespace geometry_restraints {
       return c_rep * rexp * std::pow(term, rexp-1) * d_term_d_r / delta;
     }
 
+    //! Support for nonbonded class.
+    /*! Not available in Python.
+     */
+    double
+    d2_residual_d_delta2(
+      double delta, double /* vdw_distance */, double term) const
+    {
+      if (term <= 0 || delta == 0) return 0;
+      double d_term_d_r, d2_term_d_r2;
+      if (irexp == 1) {
+        d_term_d_r = -1;
+        d2_term_d_r2 = 0;
+      }
+      else {
+        d_term_d_r = -irexp * std::pow(delta, irexp-1);
+        d2_term_d_r2 = -irexp * (irexp-1) * std::pow(delta, irexp-2);
+      }
+      if (rexp == 4) {
+        return c_rep * rexp * term * term
+             * (3 * d_term_d_r * d_term_d_r + term * d2_term_d_r2);
+      }
+      return c_rep * rexp * std::pow(term, rexp-2)
+           * ((rexp-1) * d_term_d_r * d_term_d_r + term * d2_term_d_r2);
+    }
+
     double c_rep;
     double k_rep;
     double irexp;
@@ -390,6 +415,17 @@ namespace cctbx { namespace geometry_restraints {
     {
       if (term == 0) return 0;
       return -irexp * term / delta / delta;
+    }
+
+    //! Support for nonbonded class.
+    /*! Not available in Python.
+     */
+    double
+    d2_residual_d_delta2(
+      double delta, double /* vdw_distance */, double term) const
+    {
+      if (term == 0) return 0;
+      return irexp * (irexp+1) * term / delta / delta;
     }
 
     double nonbonded_distance_cutoff;
@@ -459,6 +495,29 @@ namespace cctbx { namespace geometry_restraints {
            / (std::pow(2.0,exponent) * vdw_distance * delta);
     }
 
+    //! Support for nonbonded class.
+    /*! Not available in Python.
+     */
+    double
+    d2_residual_d_delta2(
+      double delta, double vdw_distance, double /* term */) const
+    {
+      if (delta >= vdw_distance) return 0;
+      using scitbx::constants::pi;
+      double b = pi / vdw_distance;
+      double a = b * delta;
+      double w2 = (std::cos(a) + 1) / 2;
+      double d_w2 = -b * std::sin(a) / 2;
+      double d2_w2 = -b * b * std::cos(a) / 2;
+      if (exponent == 1) return max_residual * d2_w2;
+      if (exponent == 2) {
+        return 2 * max_residual * (d_w2 * d_w2 + w2 * d2_w2);
+      }
+      return exponent * max_residual * (
+          (exponent-1) * std::pow(w2, exponent-2) * d_w2 * d_w2
+        + std::pow(w2, exponent-1) * d2_w2);
+    }
+
     double max_residual;
     double exponent;
   };
@@ -523,6 +582,19 @@ namespace cctbx { namespace geometry_restraints {
                         / log_norm_height_at_vdw_distance;
       CCTBX_ASSERT(minus_f_sq != 0);
       return 2 * term / minus_f_sq;
+    }
+
+    //! Support for nonbonded class.
+    /*! Not available in Python.
+     */
+    double
+    d2_residual_d_delta2(
+      double delta, double vdw_distance, double term) const
+    {
+      double minus_f_sq = (vdw_distance * vdw_distance)
+                        / log_norm_height_at_vdw_distance;
+      CCTBX_ASSERT(minus_f_sq != 0);
+      return 2 * term / minus_f_sq * (1 + 2 * delta * delta / minus_f_sq);
     }
 
     double max_residual;
@@ -631,6 +703,29 @@ namespace cctbx { namespace geometry_restraints {
         return result;
       }
 
+      //! Approximate curvatures (diagonal of the 2nd derivative matrix).
+      /*! Gauss-Newton style approximation
+          max(0, d2R/d(delta)^2) * (d(delta)/d(x))^2,
+          i.e. the term with the 2nd derivative of the distance is
+          neglected. The result is never negative and is therefore
+          suitable for preconditioning the LBFGS minimizer. The
+          curvatures with respect to sites[0] and sites[1] are identical.
+       */
+      af::tiny<scitbx::vec3<double>, 2>
+      curvatures() const
+      {
+        vec3 c0(0,0,0);
+        if (delta != 0) {
+          double d2r = function.d2_residual_d_delta2(
+            delta, vdw_distance, term_);
+          if (d2r > 0) {
+            vec3 u = diff_vec / delta;
+            c0 = d2r * u.each_mul(u);
+          }
+        }
+        return af::tiny<vec3, 2>(c0, c0);
+      }
+
       // Not available in Python.
       void
       add_gradients(
@@ -672,6 +767,49 @@ namespace cctbx { namespace geometry_restraints {
         cache.gradients[pair.i_seq] += grad_asu;
         if (pair.j_sym == 0) {
           cache.gradients[pair.j_seq] -= grad_asu;
+        }
+      }
+
+      //! Support for nonbonded_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        nonbonded_simple_proxy::i_seqs_type const& i_seqs) const
+      {
+        vec3 c0 = curvatures()[0];
+        curvature_array[i_seqs[0]] += c0;
+        curvature_array[i_seqs[1]] += c0;
+      }
+
+      //! Support for nonbonded_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        direct_space_asu::asu_mappings<> const& asu_mappings,
+        asu_mapping_index_pair const& pair) const
+      {
+        if (delta == 0) return;
+        double d2r = function.d2_residual_d_delta2(
+          delta, vdw_distance, term_);
+        if (d2r <= 0) return;
+        vec3 u = diff_vec / delta;
+        vec3 u_i_seq = asu_mappings.r_inv_cart(pair.i_seq, 0) * u;
+        if (pair.i_seq == pair.j_seq) {
+          // Interaction with a symmetry copy of the same site: both ends
+          // move. The residual is counted with weight 0.5 in each direction.
+          vec3 g = u_i_seq
+                 - asu_mappings.r_inv_cart(pair.j_seq, pair.j_sym) * u;
+          curvature_array[pair.i_seq] += 0.5 * d2r * g.each_mul(g);
+          return;
+        }
+        curvature_array[pair.i_seq] += d2r * u_i_seq.each_mul(u_i_seq);
+        if (pair.j_sym == 0) {
+          vec3 u_j_seq = asu_mappings.r_inv_cart(pair.j_seq, 0) * u;
+          curvature_array[pair.j_seq] += d2r * u_j_seq.each_mul(u_j_seq);
         }
       }
 
@@ -760,6 +898,34 @@ namespace cctbx { namespace geometry_restraints {
     return result;
   }
 
+  /*! The nonbonded::curvatures() are added to the curvature_array if
+      curvature_array.size() == sites_cart.size(). See other overload.
+   */
+  template <typename NonbondedFunction>
+  double
+  nonbonded_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<nonbonded_simple_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array,
+    NonbondedFunction const& function)
+  {
+    CCTBX_ASSERT(   curvature_array.size() == 0
+                 || curvature_array.size() == sites_cart.size());
+    double result = 0;
+    for(std::size_t i=0;i<proxies.size();i++) {
+      nonbonded<NonbondedFunction> restraint(sites_cart, proxies[i], function);
+      result += restraint.residual();
+      if (gradient_array.size() != 0) {
+        restraint.add_gradients(gradient_array, proxies[i].i_seqs);
+      }
+      if (curvature_array.size() != 0) {
+        restraint.add_curvatures(curvature_array, proxies[i].i_seqs);
+      }
+    }
+    return result;
+  }
+
   //! Managed group of nonbonded_simple_proxy and nonbonded_asu_proxy arrays.
   typedef sorted_asu_proxies<nonbonded_simple_proxy, nonbonded_asu_proxy>
     nonbonded_sorted_asu_proxies_base;
@@ -825,7 +991,9 @@ namespace cctbx { namespace geometry_restraints {
       std::vector<bool> const& sym_active_flags,
       af::ref<scitbx::vec3<double> > const& gradient_array,
       NonbondedFunction const& function,
-      bool disable_cache=false)
+      bool disable_cache=false,
+      af::ref<scitbx::vec3<double> > const& curvature_array
+        = af::ref<scitbx::vec3<double> >(0, 0))
     {
       double result = 0;
       if (!disable_cache) {
@@ -841,6 +1009,12 @@ namespace cctbx { namespace geometry_restraints {
           if (gradient_array.size() != 0) {
             restraint.add_gradients(cache, proxies[i]);
           }
+          // curvatures do not transform like gradients and are
+          // therefore not accumulated in the asu cache
+          if (curvature_array.size() != 0) {
+            restraint.add_curvatures(
+              curvature_array, asu_mappings, proxies[i]);
+          }
         }
         if (gradient_array.size() != 0) {
           cache.add_gradients(gradient_array, asu_mappings);
@@ -854,6 +1028,10 @@ namespace cctbx { namespace geometry_restraints {
           else                       result += restraint.residual()*.5;
           if (gradient_array.size() != 0) {
             restraint.add_gradients(gradient_array, asu_mappings, proxies[i]);
+          }
+          if (curvature_array.size() != 0) {
+            restraint.add_curvatures(
+              curvature_array, asu_mappings, proxies[i]);
           }
         }
       }
@@ -899,6 +1077,39 @@ namespace cctbx { namespace geometry_restraints {
         gradient_array,
         function,
         disable_cache);
+    }
+    return result;
+  }
+
+  /*! The nonbonded::curvatures() are added to the curvature_array if
+      curvature_array.size() == sites_cart.size(). See other overload.
+   */
+  template <typename NonbondedFunction>
+  double
+  nonbonded_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    nonbonded_sorted_asu_proxies_base const& sorted_asu_proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array,
+    NonbondedFunction const& function,
+    bool disable_cache=false)
+  {
+    double result = nonbonded_residual_sum(
+      sites_cart,
+      sorted_asu_proxies.simple.const_ref(),
+      gradient_array,
+      curvature_array,
+      function);
+    if (sorted_asu_proxies.asu.size() > 0) {
+      result += detail::nonbonded_residual_sum(
+        sites_cart,
+        *sorted_asu_proxies.asu_mappings(),
+        sorted_asu_proxies.asu.const_ref(),
+        sorted_asu_proxies.asu_active_flags,
+        gradient_array,
+        function,
+        disable_cache,
+        curvature_array);
     }
     return result;
   }

@@ -1599,7 +1599,8 @@ class manager(Base_geometry):
         normalization=False,
         external_energy_function=None,
         extension_objects=[],
-        site_labels=None):
+        site_labels=None,
+        compute_curvatures=False):
     if(external_energy_function is not None):
       assert self.external_energy_function is None
     else:
@@ -1664,7 +1665,8 @@ class manager(Base_geometry):
       gradients=gradients,
       disable_asu_cache=disable_asu_cache,
       normalization=normalization,
-      extension_objects=extension_objects)
+      extension_objects=extension_objects,
+      compute_curvatures=compute_curvatures)
 
   def harmonic_restraints(self, variables, type_indices, type_weights):
     assert self.shell_sym_tables is not None

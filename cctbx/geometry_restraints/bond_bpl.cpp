@@ -412,6 +412,7 @@ namespace {
         .def_readonly("origin_id", &w_t::origin_id)
         .def("residual", &w_t::residual)
         .def("gradients", &w_t::gradients)
+        .def("curvatures", &w_t::curvatures)
         .def_pickle(bond_wrappers())
         ;
     }
@@ -479,6 +480,30 @@ namespace {
         arg("sites_cart"),
         arg("proxies"),
         arg("gradient_array")));
+    def("bond_residual_sum",
+      (double(*)(
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<bond_simple_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+      bond_residual_sum, (
+        arg("sites_cart"),
+        arg("proxies"),
+        arg("gradient_array"),
+        arg("curvature_array")));
+    def("bond_residual_sum",
+      (double(*)(
+        uctbx::unit_cell const&,
+        af::const_ref<scitbx::vec3<double> > const&,
+        af::const_ref<bond_simple_proxy> const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&))
+      bond_residual_sum, (
+        arg("unit_cell"),
+        arg("sites_cart"),
+        arg("proxies"),
+        arg("gradient_array"),
+        arg("curvature_array")));
     def("bond_deltas",
       (af::shared<double>(*)(
         uctbx::unit_cell const&,
@@ -550,6 +575,18 @@ namespace {
           arg("sites_cart"),
           arg("sorted_asu_proxies"),
           arg("gradient_array"),
+          arg("disable_cache")=false));
+    def("bond_residual_sum",
+      (double(*)(
+        af::const_ref<scitbx::vec3<double> > const&,
+        bond_sorted_asu_proxies_base const&,
+        af::ref<scitbx::vec3<double> > const&,
+        af::ref<scitbx::vec3<double> > const&,
+        bool)) bond_residual_sum, (
+          arg("sites_cart"),
+          arg("sorted_asu_proxies"),
+          arg("gradient_array"),
+          arg("curvature_array"),
           arg("disable_cache")=false));
 
     def("home_restraints_summation_skip_special_positions",

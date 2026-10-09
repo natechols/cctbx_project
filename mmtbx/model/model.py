@@ -4277,7 +4277,8 @@ class manager(object):
         custom_nonbonded_function=None,
         compute_gradients=False,
         gradients=None,
-        disable_asu_cache=False):
+        disable_asu_cache=False,
+        compute_curvatures=False):
     if(self.restraints_manager is None): return None
     sites_cart = self._xray_structure.sites_cart()
     ias_selection = self.get_ias_selection()
@@ -4293,6 +4294,7 @@ class manager(object):
       gradients=gradients,
       disable_asu_cache=disable_asu_cache,
       hd_selection=self.get_hd_selection(),
+      compute_curvatures=compute_curvatures,
     )
     return result
 
@@ -4996,7 +4998,8 @@ class manager(object):
                           pdb_deposition = False):
     self.adp_statistics().show(log = out, prefix = prefix)
 
-  def energies_adp(self, iso_restraints, compute_gradients, use_hd):
+  def energies_adp(self, iso_restraints, compute_gradients, use_hd,
+                   compute_curvatures=False):
     if self.restraints_manager is None: return None
     assert self.refinement_flags is not None
     if iso_restraints is None:
@@ -5018,7 +5021,8 @@ class manager(object):
         parameters        = iso_restraints,
         use_u_local_only  = iso_restraints.use_u_local_only,
         use_hd            = use_hd,
-        compute_gradients = compute_gradients)
+        compute_gradients = compute_gradients,
+        compute_curvatures = compute_curvatures)
       target = energies_adp_iso.target
     else:
       energies_adp_aniso = self.restraints_manager.energies_adp_aniso(
@@ -5033,13 +5037,26 @@ class manager(object):
       if(n_aniso == 0):
         u_iso_gradients = energies_adp_iso.gradients
       else:
-        u_aniso_gradients = energies_adp_aniso.gradients_aniso_star
+        # gradients with respect to u_cart, the parameters of the minimizer
+        # (mmtbx.refinement.minimization, xray.minimization.apply_shifts)
+        u_aniso_gradients = energies_adp_aniso.gradients_aniso_cart
         u_iso_gradients = energies_adp_aniso.gradients_iso
+    # curvatures with respect to u_iso and u_cart
+    u_iso_curvatures = None
+    u_aniso_curvatures = None
+    if(compute_curvatures):
+      if(n_aniso == 0):
+        u_iso_curvatures = energies_adp_iso.curvatures
+      else:
+        u_iso_curvatures = energies_adp_aniso.curvatures_iso
+        u_aniso_curvatures = energies_adp_aniso.curvatures_aniso_cart
     class result(object):
       def __init__(self):
         self.target = target
         self.u_iso_gradients = u_iso_gradients
         self.u_aniso_gradients = u_aniso_gradients
+        self.u_iso_curvatures = u_iso_curvatures
+        self.u_aniso_curvatures = u_aniso_curvatures
     return result()
 
   def is_inside_working_cell(self):

@@ -6,8 +6,10 @@
 #include <cctbx/xray/targets/mlf.h>
 #include <cctbx/xray/targets/mli.h>
 #include <cctbx/xray/targets/mlhl.h>
+#include <cctbx/xray/targets/curvatures.h>
 #include <boost/python/class.hpp>
 #include <boost/python/args.hpp>
+#include <boost/python/def.hpp>
 #include <boost/python/docstring_options.hpp>
 #include <boost/python/return_value_policy.hpp>
 #include <boost/python/copy_const_reference.hpp>
@@ -291,6 +293,34 @@ namespace boost_python {
     targets::boost_python::mli_wrappers::wrap();
     targets::boost_python::mlhl_wrappers::wrap();
     targets::boost_python::r_factor_wrappers::wrap();
+    {
+      using namespace boost::python;
+      def("targets_amplitude_fisher_information",
+        targets::amplitude_fisher_information_value, (
+          arg("nu"), arg("centric")));
+      def("targets_mlf_expected_curvature_one_h",
+        targets::mlf_expected_curvature_one_h, (
+          arg("fo"), arg("fc"), arg("a"), arg("b"), arg("k"), arg("e"),
+          arg("centric")));
+      def("targets_mlf_expected_curvatures_work",
+        targets::mlf_expected_curvatures_work, (
+          arg("f_obs"),
+          arg("r_free_flags"),
+          arg("f_calc"),
+          arg("alpha"),
+          arg("beta"),
+          arg("scale_factor"),
+          arg("epsilons"),
+          arg("centric_flags")));
+      def("targets_least_squares_curvatures_work",
+        targets::least_squares_curvatures_work, (
+          arg("obs_type"),
+          arg("obs"),
+          arg("weights"),
+          arg("r_free_flags"),
+          arg("f_calc"),
+          arg("scale_factor")));
+    }
   }
 
 }}} // namespace cctbx::xray::boost_python

@@ -92,6 +92,17 @@ namespace boost_python {
           arg("sites_cart"),
           arg("proxies"),
           arg("gradient_array")));
+      def("reference_coordinate_residual_sum",
+        (double(*)(
+          af::const_ref<scitbx::vec3<double> > const&,
+          af::const_ref<reference_coordinate_proxy> const&,
+          af::ref<scitbx::vec3<double> > const&,
+          af::ref<scitbx::vec3<double> > const&))
+        reference_coordinate_residual_sum, (
+          arg("sites_cart"),
+          arg("proxies"),
+          arg("gradient_array"),
+          arg("curvature_array")));
 
     }
   }

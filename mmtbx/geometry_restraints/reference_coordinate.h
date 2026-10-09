@@ -58,15 +58,26 @@ namespace mmtbx { namespace geometry_restraints {
     bool top_out;
   };
 
+  /*! Residual sum, gradients and, if curvature_array.size() != 0, the
+      diagonal of the 2nd derivatives (curvatures) for preconditioning:
+        harmonic: 2 weight
+        top-out:  2 weight e (1 - 2 delta_k^2 / limit^2),
+                  e = exp(-|delta|^2 / limit^2), clipped at zero
+      (exact; the top-out residual is not convex beyond the inflection
+      point).
+   */
   inline
   double
   reference_coordinate_residual_sum(
     af::const_ref<scitbx::vec3<double> > const& sites_cart,
     af::const_ref<reference_coordinate_proxy> const& proxies,
-    af::ref<scitbx::vec3<double> > const& gradient_array)
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
   {
     CCTBX_ASSERT(   gradient_array.size() == 0
                  || gradient_array.size() == sites_cart.size());
+    CCTBX_ASSERT(   curvature_array.size() == 0
+                 || curvature_array.size() == sites_cart.size());
     double residual_sum = 0, weight, residual, limit, top;
     scitbx::vec3<double> site, ref_site, delta;
     scitbx::vec3<double> gradient;
@@ -86,10 +97,21 @@ namespace mmtbx { namespace geometry_restraints {
         residual = top * (1.0-std::exp(-weight*delta*delta/top));
         gradient = (delta*2.0*weight)
                       * std::exp(-(weight*delta*delta)/top);
+        if (curvature_array.size() != 0 && top > 0) {
+          double f = 2.0 * weight * std::exp(-(weight*delta*delta)/top);
+          for (std::size_t k = 0; k < 3; k++) {
+            double c = f * (1.0 - 2.0*weight*delta[k]*delta[k]/top);
+            if (c > 0) curvature_array[ i_seq ][k] += c;
+          }
+        }
       }
       else {
         residual = delta*delta*weight;
         gradient = delta*2.0*weight;
+        if (curvature_array.size() != 0) {
+          curvature_array[ i_seq ] += scitbx::vec3<double>(1,1,1)
+                                    * (2.0*weight);
+        }
       }
       residual_sum += residual;
       if (gradient_array.size() != 0) {
@@ -97,5 +119,16 @@ namespace mmtbx { namespace geometry_restraints {
       }
     }
     return residual_sum;
+  }
+
+  inline
+  double
+  reference_coordinate_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<reference_coordinate_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array)
+  {
+    return reference_coordinate_residual_sum(sites_cart, proxies,
+      gradient_array, af::ref<scitbx::vec3<double> >(0, 0));
   }
 }}

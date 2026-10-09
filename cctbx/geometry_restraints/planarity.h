@@ -273,10 +273,66 @@ namespace cctbx { namespace geometry_restraints {
           if (sym_ops.get() != 0 && !sym_ops[i].is_unit_mx() ) {
             scitbx::mat3<double>
               r_inv_cart_ = r_inv_cart(unit_cell, sym_ops[i]);
-            gradient_array[i_seqs_ref[i]] += grads_ref[i] * r_inv_cart_;
+            gradient_array[i_seqs_ref[i]] += r_inv_cart_ * grads_ref[i];
           }
           else { gradient_array[i_seqs_ref[i]] += grads_ref[i]; }
         }
+      }
+
+      //! Approximate curvatures (diagonal of the 2nd derivative matrix).
+      /*! Gauss-Newton approximation with the plane normal n held fixed:
+            2 * w_i * (1 - w_i / sum(w)) * n**2
+          for site i (the factor (1 - w_i / sum(w)) is due to the
+          dependence of the center of mass on the site). Because the
+          plane normal minimizes the residual, the exact diagonal is
+          never larger than this approximation. The result is never
+          negative and is therefore suitable for preconditioning the
+          LBFGS minimizer.
+       */
+      af::shared<scitbx::vec3<double> >
+      curvatures() const
+      {
+        af::shared<scitbx::vec3<double> > result(
+          sites.size(), scitbx::vec3<double>(0,0,0));
+        af::shared<std::size_t> i_seqs(sites.size());
+        for(std::size_t i=0;i<i_seqs.size();i++) i_seqs[i] = i;
+        af::shared<scitbx::vec3<double> > n(sites.size(), normal());
+        add_curvatures_impl(result.ref(), i_seqs.const_ref(), n.const_ref());
+        return result;
+      }
+
+      //! Support for planarity_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        planarity_proxy::i_seqs_type const& i_seqs) const
+      {
+        af::shared<scitbx::vec3<double> > n(sites.size(), normal());
+        add_curvatures_impl(
+          curvature_array, i_seqs.const_ref(), n.const_ref());
+      }
+
+      //! Support for planarity_residual_sum. See also: curvatures()
+      /*! Not available in Python.
+       */
+      void
+      add_curvatures(
+        uctbx::unit_cell const& unit_cell,
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        planarity_proxy const& proxy) const
+      {
+        optional_container<af::shared<sgtbx::rt_mx> > const&
+          sym_ops = proxy.sym_ops;
+        af::shared<scitbx::vec3<double> > n(sites.size(), normal());
+        for(std::size_t i=0;i<n.size();i++) {
+          if (sym_ops.get() != 0 && !sym_ops[i].is_unit_mx() ) {
+            n[i] = r_inv_cart(unit_cell, sym_ops[i]) * n[i];
+          }
+        }
+        add_curvatures_impl(
+          curvature_array, proxy.i_seqs.const_ref(), n.const_ref());
       }
 
       /*! The plane normal is identical to the eigenvector corresponding
@@ -311,6 +367,48 @@ namespace cctbx { namespace geometry_restraints {
       eigensystem() const { return eigensystem_; }
 
     protected:
+      /*! n[i] is the plane normal rotated back to the frame of
+          i_seqs[i]. Contributions of sites with identical i_seqs (e.g.
+          a site and its symmetry copy) are summed before squaring.
+       */
+      void
+      add_curvatures_impl(
+        af::ref<scitbx::vec3<double> > const& curvature_array,
+        af::const_ref<std::size_t> const& i_seqs,
+        af::const_ref<scitbx::vec3<double> > const& n) const
+      {
+        af::const_ref<double> w = weights.const_ref();
+        std::size_t n_sites = i_seqs.size();
+        double sum_w = af::sum(w);
+        if (sum_w <= 0) return;
+        for(std::size_t i=0;i<n_sites;i++) {
+          bool seen = false;
+          for(std::size_t j=0;j<i;j++) {
+            if (i_seqs[j] == i_seqs[i]) { seen = true; break; }
+          }
+          if (seen) continue;
+          // d(delta_k)/d(x) = [i_seqs[k]==i_seqs[i]] * n[k] - m
+          scitbx::vec3<double> m(0,0,0);
+          for(std::size_t j=i;j<n_sites;j++) {
+            if (i_seqs[j] == i_seqs[i]) m += w[j] * n[j];
+          }
+          m /= sum_w;
+          scitbx::vec3<double> c(0,0,0);
+          double sum_w_other = 0;
+          for(std::size_t k=0;k<n_sites;k++) {
+            if (i_seqs[k] == i_seqs[i]) {
+              scitbx::vec3<double> g = n[k] - m;
+              c += w[k] * g.each_mul(g);
+            }
+            else {
+              sum_w_other += w[k];
+            }
+          }
+          c += sum_w_other * m.each_mul(m);
+          curvature_array[i_seqs[i]] += 2. * c;
+        }
+      }
+
       scitbx::vec3<double> center_of_mass_;
       scitbx::sym_mat3<double> residual_tensor_;
       scitbx::matrix::eigensystem::real_symmetric<double> eigensystem_;
@@ -451,6 +549,35 @@ namespace cctbx { namespace geometry_restraints {
   {
     return detail::generic_residual_sum<planarity_proxy, planarity>::get(
       unit_cell, sites_cart, proxies, gradient_array);
+  }
+
+  /*! The planarity::curvatures() are added to the curvature_array if
+      curvature_array.size() == sites_cart.size(). See other overload.
+   */
+  inline
+  double
+  planarity_residual_sum(
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<planarity_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<planarity_proxy, planarity>::get(
+      sites_cart, proxies, gradient_array, curvature_array);
+  }
+
+  //! See overload.
+  inline
+  double
+  planarity_residual_sum(
+    uctbx::unit_cell const& unit_cell,
+    af::const_ref<scitbx::vec3<double> > const& sites_cart,
+    af::const_ref<planarity_proxy> const& proxies,
+    af::ref<scitbx::vec3<double> > const& gradient_array,
+    af::ref<scitbx::vec3<double> > const& curvature_array)
+  {
+    return detail::generic_residual_sum<planarity_proxy, planarity>::get(
+      unit_cell, sites_cart, proxies, gradient_array, curvature_array);
   }
 }} // namespace cctbx::geometry_restraints
 

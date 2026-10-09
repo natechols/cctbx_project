@@ -195,11 +195,37 @@ namespace mmtbx { namespace ncs { namespace cartesian_restraints {
       double u_average_min,
       af::ref<double> const& gradients)
     {
+      return adp_iso_residual_sum_and_curvatures(
+        weight, average_power, u_isos, u_average_min, gradients,
+        af::ref<double>(0, 0));
+    }
+
+    /*! The residual for each set of n NCS-related atoms is
+          weight * sum_k (u_k - u_ave)^2 / u_ave^p
+        Gauss-Newton curvatures (with r_k = (u_k - u_ave) / u_ave^(p/2)):
+          2 weight u_ave^-p (A + 2 a_j + 1)
+        with a_k = -1/n - p/(2n) (u_k - u_ave)/u_ave and A = sum_k a_k^2,
+        which is 2 weight (1 - 1/n) for p = 0.
+        Curvatures are added if curvatures.size() != 0.
+     */
+    double
+    adp_iso_residual_sum_and_curvatures(
+      double weight,
+      double average_power,
+      af::const_ref<double> const& u_isos,
+      double u_average_min,
+      af::ref<double> const& gradients,
+      af::ref<double> const& curvatures)
+    {
       MMTBX_ASSERT(   u_isos.size()
                    ==   tab_i_seqs_.size()
                       + number_of_additional_isolated_sites);
       MMTBX_ASSERT(   gradients.size() == 0
                    ||    gradients.size()
+                      ==   tab_i_seqs_.size()
+                         + number_of_additional_isolated_sites);
+      MMTBX_ASSERT(   curvatures.size() == 0
+                   ||    curvatures.size()
                       ==   tab_i_seqs_.size()
                          + number_of_additional_isolated_sites);
       unsigned n_seq = static_cast<unsigned>(tab_i_seqs_.size());
@@ -241,6 +267,24 @@ namespace mmtbx { namespace ncs { namespace cartesian_restraints {
               if (i_seq == n_seq) continue;
               double u_diff = u_isos[i_seq] - u_ave;
               gradients[i_seq] += (f1 * (u_diff * n - u_diff_sum)) - t2;
+            }
+          }
+          if (curvatures.size() != 0) {
+            double sum_a_sq = 0;
+            for(unsigned i=0;i<n_ncs;i++) {
+              unsigned i_seq = i_seqs[i];
+              if (i_seq == n_seq) continue;
+              double a = -1./n - average_power / (2.*n)
+                       * (u_isos[i_seq] - u_ave) / u_ave;
+              sum_a_sq += a * a;
+            }
+            double f = 2 * weight / u_ave_pow;
+            for(unsigned i=0;i<n_ncs;i++) {
+              unsigned i_seq = i_seqs[i];
+              if (i_seq == n_seq) continue;
+              double a = -1./n - average_power / (2.*n)
+                       * (u_isos[i_seq] - u_ave) / u_ave;
+              curvatures[i_seq] += f * (sum_a_sq + 2*a + 1);
             }
           }
         }
