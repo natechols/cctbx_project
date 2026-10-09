@@ -9,7 +9,7 @@ import mmtbx.model
 import mmtbx.f_model
 import mmtbx
 from mmtbx.refinement import minimization, weights
-from cctbx import xray
+from cctbx import xray, adptbx
 from cctbx.array_family import flex
 from libtbx.test_utils import approx_equal
 from libtbx.utils import null_out
@@ -208,6 +208,7 @@ def run():
   assert restraints_part.all_ge(0)
   assert flex.max(restraints_part) > 0
   exercise_simultaneous(f_obs, flags)
+  exercise_smooth_target(f_obs, flags)
   exercise_aniso_gradients()
   print("OK")
 
@@ -322,6 +323,86 @@ def exercise_simultaneous(f_obs, flags):
     assert flex.max(shifts) > 0.1
     b = fmodel.xray_structure.extract_u_iso_or_u_equiv()
     assert flex.max(b) - flex.min(b) > 0
+
+class probing_lbfgs(minimization.lbfgs):
+  """
+  Records the state of the restraints during the minimization, and the
+  effect of apply_shifts() on large negative u_iso shifts.
+  """
+  def compute_functional_and_gradients(self, compute_curvatures=False):
+    base = minimization.lbfgs.compute_functional_and_gradients
+    if (not hasattr(self, "probe")):
+      self.probe = group_args(
+        plain_pairs_radius = self.restraints_manager.geometry.plain_pairs_radius)
+      # u_iso shift far below u_min (B -5): truncated unless smooth_target
+      x0 = self.x.deep_copy()
+      all_ = flex.bool(x0.size(), True)
+      i_u = self.u_iso_parameter_selection().iselection()[0]
+      self.x[i_u] = adptbx.b_as_u(-20)
+      self.apply_shifts()
+      self.probe.u_shift = self.x[i_u]
+      self.x.set_selected(all_, x0)
+    return base(self, compute_curvatures=compute_curvatures)
+
+def exercise_smooth_target(f_obs, flags):
+  """smooth_target=True: see mmtbx.refinement.minimization.lbfgs"""
+  model0 = get_model()
+  xrs = model0.get_xray_structure()
+  xrs.shake_sites_in_place(rms_difference=0.3)
+  xrs.set_b_iso(value=40)
+  model0.set_xray_structure(xrs)
+  w = weights.weights(wx=1, wx_scale=1, w=1)
+  tw = group_args(xyz_weights_result=w, adp_weights_result=w)
+  for smooth_target in [False, True]:
+    model = model0.deep_copy()
+    xrs = model.get_xray_structure()
+    xray.set_scatterer_grad_flags(scatterers=xrs.scatterers(), site=True,
+      u_iso=True)
+    model.set_refinement_flags(mmtbx.refinement.refinement_flags.manager(
+      individual_sites=True, individual_adp=True,
+      sites_individual=flex.bool(xrs.scatterers().size(), True),
+      adp_individual_iso=flex.bool(xrs.scatterers().size(), True)))
+    fmodel = mmtbx.f_model.manager(f_obs=f_obs, r_free_flags=flags,
+      xray_structure=xrs, target_name="ml")
+    fmodel.update_all_scales(remove_outliers=False)
+    geometry = model.restraints_manager.geometry
+    plain_pairs_radius = geometry.plain_pairs_radius
+    assert plain_pairs_radius is not None
+    r_start = fmodel.r_work()
+    m = probing_lbfgs(
+      fmodels=mmtbx.fmodels(fmodel_xray=fmodel),
+      restraints_manager=model.restraints_manager,
+      model=model,
+      target_weights=tw,
+      refine_xyz=True,
+      refine_adp=True,
+      iso_restraints=mmtbx.refinement.adp_refinement.\
+        adp_restraints_master_params.extract().iso,
+      h_params=group_args(refine="riding"),
+      lbfgs_termination_params=scitbx.lbfgs.termination_parameters(
+        max_iterations=20),
+      collect_monitor=False,
+      log=null_out(),
+      use_curvatures=True,
+      smooth_target=smooth_target)
+    assert fmodel.r_work() < r_start
+    # restored after the minimization
+    assert geometry.plain_pairs_radius == plain_pairs_radius
+    if (smooth_target):
+      # the pair table of the ADP restraints is not updated during the
+      # minimization; the normalization is fixed; no truncation of shifts
+      assert m.probe.plain_pairs_radius is None
+      assert sorted(m._fixed_normalization.keys()) == ["adp", "geometry"]
+      # (the u_iso shifts are truncated in both cases)
+      assert approx_equal(m.probe.u_shift, m.u_min)
+      e = group_args(normalization_factor =
+        m._fixed_normalization["geometry"] * 2)
+      assert approx_equal(m._normalization_scale("geometry", e), 0.5)
+    else:
+      assert m.probe.plain_pairs_radius == plain_pairs_radius
+      assert approx_equal(m.probe.u_shift, m.u_min)
+      assert m._normalization_scale("geometry",
+        group_args(normalization_factor=1)) == 1
 
 if (__name__ == "__main__"):
   run()

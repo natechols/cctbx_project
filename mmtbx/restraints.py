@@ -275,6 +275,7 @@ class manager(object):
         #compute_gradients=compute_gradients,
         #gradients=result.gradients
         )
+    result.normalization_factor = None
     if(self.normalization):
        normalization_scale = 1.0
        if(result.number_of_restraints > 0):
@@ -287,6 +288,7 @@ class manager(object):
          result.curvatures_iso *= normalization_scale
        if(result.gradients_iso is not None):
           result.gradients_iso *= normalization_scale
+       result.normalization_factor = normalization_scale
     return result
 
   def write_geo_file(self,

@@ -5050,9 +5050,15 @@ class manager(object):
       else:
         u_iso_curvatures = energies_adp_aniso.curvatures_iso
         u_aniso_curvatures = energies_adp_aniso.curvatures_aniso_cart
+    if(n_aniso == 0):
+      normalization_factor = energies_adp_iso.normalization_factor
+    else:
+      normalization_factor = getattr(energies_adp_aniso,
+        "normalization_factor", None)
     class result(object):
       def __init__(self):
         self.target = target
+        self.normalization_factor = normalization_factor
         self.u_iso_gradients = u_iso_gradients
         self.u_aniso_gradients = u_aniso_gradients
         self.u_iso_curvatures = u_iso_curvatures

@@ -47,7 +47,8 @@ class lbfgs(object):
                      curvature_floor_fraction = 0.1,
                      occupancy_groups         = None,
                      occupancy_min            = 0.0,
-                     occupancy_max            = 1.0):
+                     occupancy_max            = 1.0,
+                     smooth_target            = False):
     """
     occupancy_groups (e.g. from mmtbx.refinement.occupancies.
     occupancy_selections) are refined simultaneously with the coordinates
@@ -65,6 +66,22 @@ class lbfgs(object):
     and cctbx.adp_restraints.adp_aniso_restraints). Parameters without
     curvatures are handled as described in
     scitbx.lbfgs.curvature_preconditioner.
+
+    If smooth_target is True, the target is a smooth function of the
+    parameters during the minimization (otherwise the line search fails
+    near convergence, where the remaining decrease of the target is
+    smaller than its discontinuities):
+      - the pair table of the ADP restraints (local spheres) is fixed
+        during the minimization (updated at the start); otherwise it is
+        updated together with the nonbonded pair proxies, and pairs
+        entering or leaving the spheres change the target discontinuously;
+      - the normalization of the geometry and ADP restraints (by the
+        number of restraints, which includes the nonbonded pairs) is fixed
+        at its value at the start of the minimization.
+    The truncation of u_iso shifts to [u_min, u_max] is not smooth (the
+    target is flat along truncated parameters) but is kept: without it the
+    ADPs drift much further in each minimization, which made the results
+    worse at low resolution (the truncation acts as a regularization).
     """
     timer = user_plus_sys_time()
     adopt_init_args(self, locals())
@@ -122,6 +139,17 @@ class lbfgs(object):
     self.riding_h_manager = self.model.riding_h_manager
     self._setup_occupancy_groups()
     self._scatterers_start = self.xray_structure.scatterers()
+    self._fixed_normalization = {}
+    geometry = None
+    if(smooth_target and self.restraints_manager is not None):
+      geometry = self.restraints_manager.geometry
+    plain_pairs_radius = None
+    if(geometry is not None and geometry.plain_pairs_radius is not None):
+      plain_pairs_radius = geometry.plain_pairs_radius
+      if(self.refine_adp):
+        geometry.update_plain_pair_sym_table(
+          sites_frac = self.xray_structure.sites_frac())
+      geometry.plain_pairs_radius = None # no updates during minimization
     self.curvatures = None
     if(use_curvatures):
       if(self.neutron_refinement):
@@ -133,14 +161,18 @@ class lbfgs(object):
     #lbfgs_core_params = scitbx.lbfgs.core_parameters(
     #  stpmin = 1.e-9,
     #  stpmax = adptbx.b_as_u(10))
-    self.minimizer = scitbx.lbfgs.run(
-      target_evaluator          = self,
-      termination_params        = lbfgs_termination_params,
-      use_fortran               = use_fortran,
-    #  core_params = lbfgs_core_params,
-    #  gradient_only=True,
-      exception_handling_params = scitbx.lbfgs.exception_handling_parameters(
-                         ignore_line_search_failed_step_at_lower_bound = True))
+    try:
+      self.minimizer = scitbx.lbfgs.run(
+        target_evaluator          = self,
+        termination_params        = lbfgs_termination_params,
+        use_fortran               = use_fortran,
+      #  core_params = lbfgs_core_params,
+      #  gradient_only=True,
+        exception_handling_params = scitbx.lbfgs.exception_handling_parameters(
+                           ignore_line_search_failed_step_at_lower_bound = True))
+    finally:
+      if(plain_pairs_radius is not None):
+        geometry.plain_pairs_radius = plain_pairs_radius
     self.apply_shifts()
     if(self._occ is not None):
       self._finalize_occupancies()
@@ -444,9 +476,12 @@ class lbfgs(object):
             self.stereochemistry_residuals.target=qblib_f
 # QBLIB END
       er = self.stereochemistry_residuals.target
+      geometry_scale = self._normalization_scale("geometry",
+        self.stereochemistry_residuals)
+      er = er * geometry_scale
       self.f += er * self.weights.w
       if(compute_gradients):
-        sgc = self.stereochemistry_residuals.gradients
+        sgc = self.stereochemistry_residuals.gradients * geometry_scale
         # ias do not participate in geometry restraints
         if self.model is not None and self.model.ias_manager is not None:
           ias_selection = self.model.ias_manager.get_ias_selection()
@@ -458,7 +493,7 @@ class lbfgs(object):
           site_gradients = sgc*self.weights.w)
       if(compute_curvatures and
          self.stereochemistry_residuals.curvatures is not None):
-        scc = self.stereochemistry_residuals.curvatures.deep_copy()
+        scc = self.stereochemistry_residuals.curvatures * geometry_scale
         if self.model is not None and self.model.ias_manager is not None:
           ias_selection = self.model.ias_manager.get_ias_selection()
           if ias_selection is not None and ias_selection.count(True) > 0:
@@ -482,9 +517,10 @@ class lbfgs(object):
         use_hd             = use_hd,
         compute_gradients  = compute_gradients,
         compute_curvatures = compute_curvatures)
-      self.f += energies_adp.target * self.adp_restraints_weight
+      adp_scale = self._normalization_scale("adp", energies_adp)
+      self.f += energies_adp.target * self.adp_restraints_weight * adp_scale
       if(compute_curvatures):
-        w_a = self.adp_restraints_weight
+        w_a = self.adp_restraints_weight * adp_scale
         u_iso_curvatures = energies_adp.u_iso_curvatures
         if(u_iso_curvatures is not None):
           u_iso_curvatures = u_iso_curvatures * w_a
@@ -498,16 +534,16 @@ class lbfgs(object):
           u_iso_gradients   = u_iso_curvatures,
           u_aniso_gradients = u_aniso_curvatures)
       if(compute_gradients):
+        w_a = self.adp_restraints_weight * adp_scale
         if(energies_adp.u_aniso_gradients is None):
           xray.minimization.add_gradients(
             scatterers      = self.xray_structure.scatterers(),
             xray_gradients  = self.g,
-            u_iso_gradients = energies_adp.u_iso_gradients
-                            * self.adp_restraints_weight)
+            u_iso_gradients = energies_adp.u_iso_gradients * w_a)
         else:
-          energies_adp.u_aniso_gradients *= self.adp_restraints_weight
+          energies_adp.u_aniso_gradients *= w_a
           if(energies_adp.u_iso_gradients is not None):
-            energies_adp.u_iso_gradients *= self.adp_restraints_weight
+            energies_adp.u_iso_gradients *= w_a
           xray.minimization.add_gradients(
             scatterers        = self.xray_structure.scatterers(),
             xray_gradients    = self.g,
@@ -521,6 +557,18 @@ class lbfgs(object):
       if(compute_curvatures):
         self.curvatures = self._to_parameters(self.curvatures,
           curvatures = True)
+
+  def _normalization_scale(self, key, energies):
+    """
+    Factor that replaces the normalization of energies (target divided by
+    the current number of restraints) by the normalization at the first
+    evaluation (smooth_target=True), otherwise 1.
+    """
+    if(not self.smooth_target): return 1.0
+    factor = getattr(energies, "normalization_factor", None)
+    if(factor is None or factor == 0): return 1.0
+    fixed = self._fixed_normalization.setdefault(key, factor)
+    return fixed / factor
 
   def callback_after_step(self, minimizer):
     if (self.verbose > 0):
