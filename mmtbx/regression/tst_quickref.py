@@ -463,12 +463,17 @@ def exercise_ncs():
   model_file = "tst_quickref_ncs_start.pdb"
   with open(model_file, "w") as f:
     f.write(hierarchy.as_pdb_string(crystal_symmetry=xrs.crystal_symmetry()))
-  # the default (ncs.type=none) does not use NCS
-  log = io.StringIO()
-  run_program(program_class=quickref.Program, args=[model_file, data_file,
-    "output.prefix=tst_quickref_ncs", "output.overwrite=True",
-    "number_of_macro_cycles=1", "write_map_coefficients=False"], logger=log)
-  assert "NCS" not in log.getvalue(), log.getvalue()
+  # the default (ncs.type=auto) uses torsion NCS if NCS is found;
+  # ncs.type=none does not use NCS
+  for args, expected in [([], True), (["ncs.type=none"], False)]:
+    log = io.StringIO()
+    run_program(program_class=quickref.Program, args=[model_file, data_file,
+      "output.prefix=tst_quickref_ncs", "output.overwrite=True",
+      "number_of_macro_cycles=1", "write_map_coefficients=False"] + args,
+      logger=log)
+    text = log.getvalue()
+    assert ("Torsion NCS restraints" in text) == expected, (args, text)
+    assert ("NCS groups: 1 (3 copies)" in text) == expected, (args, text)
   for ncs_type, expected in [
       ("cartesian", "Cartesian NCS restraints"),
       ("torsion", "Torsion NCS restraints")]:

@@ -196,10 +196,11 @@ input_tls
 ncs
   .short_caption = NCS restraints
 {
-  type = *none torsion cartesian
+  type = *auto none torsion cartesian
     .type = choice
-    .help = NCS restraints: none, torsion-angle NCS restraints, or Cartesian \
-            NCS restraints (coordinates restrained to the NCS average, and \
+    .help = NCS restraints: auto (torsion-angle NCS restraints if NCS is \
+            found), none, torsion-angle NCS restraints, or Cartesian NCS \
+            restraints (coordinates restrained to the NCS average, and \
             B-factors if b_factor_weight > 0). NCS groups are found \
             automatically.
   coordinate_sigma = 0.05
@@ -866,12 +867,16 @@ Usage examples:
     model.search_for_ncs(log=null_out())
     groups = model.get_ncs_groups()
     if (groups is None or len(groups) == 0):
-      print("No NCS found: NCS restraints are not used.", file=log)
+      if (p.type != "auto"):
+        print("No NCS found: NCS restraints are not used.", file=log)
       return
+    ncs_type = p.type
+    if (ncs_type == "auto"):
+      ncs_type = "torsion"
     print("NCS groups: %d (%s)" % (len(groups), ", ".join(
       ["%d copies" % (g.get_number_of_copies()+1) for g in groups])),
       file=log)
-    if (p.type == "cartesian"):
+    if (ncs_type == "cartesian"):
       from mmtbx.ncs.ncs_params import global_ncs_params
       ncs_params = global_ncs_params.extract().ncs
       ncs_params.type = "cartesian"
@@ -881,7 +886,7 @@ Usage examples:
       print("Cartesian NCS restraints: coordinate_sigma=%.3f "
         "b_factor_weight=%s" % (p.coordinate_sigma, p.b_factor_weight),
         file=log)
-    elif (p.type == "torsion"):
+    elif (ncs_type == "torsion"):
       model.setup_torsion_ncs_restraints(
         fmodel             = self.fmodel,
         ncs_torsion_params = p.torsion,
