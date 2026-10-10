@@ -1030,12 +1030,8 @@ class structure(crystal.special_position_settings):
     :returns: an array to select all H and D scatterers of the structure
     :rtype: boolean[]
     """
-    scattering_types = self._scatterers.extract_scattering_types()
-    result = flex.bool()
-    for sct in scattering_types:
-      if(sct.strip() in ['H','D']): result.append(True)
-      else: result.append(False)
-    return result
+    scattering_types = self._scatterers.extract_scattering_types().strip()
+    return (scattering_types == "H") | (scattering_types == "D")
 
   def element_selection(self, *elements):
     """Get a selector array for scatterers of specified element type(s) of the structure.
@@ -1856,20 +1852,15 @@ class structure(crystal.special_position_settings):
     scatterer_flags.assign_to(self.scatterers())
 
   def n_parameters(self, considering_site_symmetry_constraints=False):
-    # XXX move to C++
+    if (not considering_site_symmetry_constraints):
+      return ext.scatterers_n_parameters(self.scatterers())
     result = 0
-    if (considering_site_symmetry_constraints):
-      sstab = self.site_symmetry_table()
-    else:
-      sstab = None
+    sstab = self.site_symmetry_table()
     for i_sc,sc in enumerate(self.scatterers()):
       flags = sc.flags
-      if (sstab is None):
+      site_symmetry = sstab.get(i_sc)
+      if (site_symmetry.is_point_group_1()):
         site_symmetry = None
-      else:
-        site_symmetry = sstab.get(i_sc)
-        if (site_symmetry.is_point_group_1()):
-          site_symmetry = None
       if (flags.grad_site()):
         if (site_symmetry is None):
           result += 3

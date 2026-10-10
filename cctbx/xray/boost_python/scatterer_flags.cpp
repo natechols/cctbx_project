@@ -211,6 +211,8 @@ namespace {
     scatterer_flags_wrappers::wrap();
     scatterer_flags_array_wrappers::wrap();
     scatterer_grad_flags_counts_wrappers::wrap();
+    def("scatterers_n_parameters", scatterers_n_parameters<scatterer<> >,
+      (arg("scatterers")));
     def("set_scatterer_grad_flags",
         set_scatterer_grad_flags<scatterer<> >,
          (arg("scatterers"),

@@ -2653,8 +2653,24 @@ class manager(object):
       self._has_hd = sel.count(True)>0
     if not self._has_hd:
       self.unset_riding_h_manager()
-    if self._has_hd:
-      self.exchangable_hd_groups = self._pdb_hierarchy.exchangeable_hd_selections()
+    # recomputed when needed (exchangable_hd_groups)
+    self._exchangable_hd_groups = None
+
+  @property
+  def exchangable_hd_groups(self):
+    """Selections of exchangeable H/D atoms (computed from the hierarchy when
+    first needed after the model has changed)."""
+    if getattr(self, "_exchangable_hd_groups", None) is None:
+      if self.has_hd():
+        self._exchangable_hd_groups = \
+          self._pdb_hierarchy.exchangeable_hd_selections()
+      else:
+        self._exchangable_hd_groups = []
+    return self._exchangable_hd_groups
+
+  @exchangable_hd_groups.setter
+  def exchangable_hd_groups(self, value):
+    self._exchangable_hd_groups = value
 
   def _update_atom_selection_cache(self):
     if self.crystal_symmetry() is not None:

@@ -320,6 +320,26 @@ namespace cctbx { namespace xray {
   };
 
 
+  /// Number of refined parameters of the scatterers, without site symmetry
+  /// constraints (as xray.structure.n_parameters(); unlike
+  /// scatterer_grad_flags_counts, the use() flag is not considered)
+  template <typename ScattererType>
+  std::size_t
+  scatterers_n_parameters(af::const_ref<ScattererType> const& scatterers)
+  {
+    std::size_t result = 0;
+    for(std::size_t i=0;i<scatterers.size();i++) {
+      scatterer_flags const& f = scatterers[i].flags;
+      if (f.grad_site()) result += 3;
+      if (f.grad_u_iso() && f.use_u_iso()) result += 1;
+      if (f.grad_u_aniso() && f.use_u_aniso()) result += 6;
+      if (f.grad_occupancy()) result += 1;
+      if (f.grad_fp()) result += 1;
+      if (f.grad_fdp()) result += 1;
+    }
+    return result;
+  }
+
   class grad_flags_counts : public grad_flags_counts_core
   {
     public:
