@@ -5,6 +5,11 @@
 
 #include <cctbx/xray/sampling_base.h>
 #include <cctbx/maptbx/grid_tags.h>
+#include <algorithm>
+#include <exception>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace cctbx { namespace xray {
 
@@ -115,26 +120,62 @@ namespace cctbx { namespace xray {
       grid_indices_for_each_scatterer_.resize(scatterers.size());
       gifes = grid_indices_for_each_scatterer_.begin();
     }
-    std::vector<unsigned> grid_indices_for_one_scatterer;
     grid_point_type const& grid_f = this->map_accessor_.focus();
     grid_point_type const& grid_a = this->map_accessor_.all();
-    detail::exponent_table<FloatType> exp_table(exp_table_one_over_step_size);
     scitbx::mat3<FloatType>
       orth_mx = this->unit_cell_.orthogonalization_matrix();
-    std::vector<int> gp1g;
-    std::vector<FloatType> o1f1_;
-    std::vector<FloatType> o4f1_;
-    std::vector<int> gp2g;
-    std::vector<FloatType> o2f2_;
-    std::vector<FloatType> o5f2_;
-    std::vector<FloatType> o8f2_;
-    typename u_radius_cache_t::const_iterator u_radius =
-      this->u_radius_cache_.begin();
-    typename u_cart_cache_t::const_iterator u_cart =
-      this->u_cart_cache_.begin();
-    for(std::size_t i_seq=0;i_seq<scatterers.size();i_seq++) {
+    std::size_t n_seq = scatterers.size();
+    // positions in the u_radius and u_cart caches
+    std::vector<std::size_t> i_u_radius(n_seq, 0);
+    std::vector<std::size_t> i_u_cart(n_seq, 0);
+    {
+      std::size_t i_r = 0, i_c = 0;
+      for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+        XrayScattererType const& scatterer = scatterers[i_seq];
+        if (scatterer.weight() == 0) continue;
+        i_u_radius[i_seq] = i_r++;
+        if (scatterer.flags.use_u_aniso()) i_u_cart[i_seq] = i_c++;
+      }
+      CCTBX_ASSERT(i_r == this->u_radius_cache_.size());
+      CCTBX_ASSERT(i_c == this->u_cart_cache_.size());
+    }
+    // sampling box statistics of each scatterer (merged in i_seq order)
+    std::vector<std::size_t> box_n_points(n_seq, 0);
+    std::vector<grid_point_type> box_edges(n_seq, grid_point_type(0,0,0));
+    std::vector<char> box_sampled(n_seq, 0);
+    std::vector<char> box_excessive_radius(n_seq, 0);
+    std::vector<grid_point_type> box_min(n_seq, grid_point_type(0,0,0));
+    std::vector<std::exception_ptr> errors(n_seq);
+    // work arrays of one thread
+    struct work_t
+    {
+      detail::exponent_table<FloatType> exp_table;
+      std::vector<unsigned> grid_indices_for_one_scatterer;
+      std::vector<int> gp1g;
+      std::vector<FloatType> o1f1_;
+      std::vector<FloatType> o4f1_;
+      std::vector<int> gp2g;
+      std::vector<FloatType> o2f2_;
+      std::vector<FloatType> o5f2_;
+      std::vector<FloatType> o8f2_;
+      work_t(FloatType const& one_over_step_size)
+      : exp_table(one_over_step_size) {}
+    };
+    // Samples scatterer i_seq into the map (box_only: the sampling box only).
+    auto sample = [&](std::size_t i_seq, work_t& work, bool box_only) {
       XrayScattererType const& scatterer = scatterers[i_seq];
-      if (scatterer.weight() == 0) continue;
+      if (scatterer.weight() == 0) return;
+      try {
+      detail::exponent_table<FloatType>& exp_table = work.exp_table;
+      std::vector<unsigned>& grid_indices_for_one_scatterer =
+        work.grid_indices_for_one_scatterer;
+      std::vector<int>& gp1g = work.gp1g;
+      std::vector<FloatType>& o1f1_ = work.o1f1_;
+      std::vector<FloatType>& o4f1_ = work.o4f1_;
+      std::vector<int>& gp2g = work.gp2g;
+      std::vector<FloatType>& o2f2_ = work.o2f2_;
+      std::vector<FloatType>& o5f2_ = work.o5f2_;
+      std::vector<FloatType>& o8f2_ = work.o8f2_;
       eltbx::xray_scattering::gaussian const&
         gaussian = scattering_type_registry.gaussian_not_optional(
           scatterer.scattering_type);
@@ -143,16 +184,17 @@ namespace cctbx { namespace xray {
       detail::gaussian_fourier_transformed<FloatType> gaussian_ft(
         exp_table,
         gaussian, scatterer.fp, scatterer.fdp, scatterer.weight(),
-        *u_radius++, this->u_extra_);
+        this->u_radius_cache_[i_u_radius[i_seq]], this->u_extra_);
       detail::calc_box<FloatType, grid_point_type, XrayScattererType>
         sampling_box(
           this->unit_cell_, this->rho_cutoff_, this->max_d_sq_upper_bound_,
           grid_f, coor_frac, gaussian_ft);
-      if (sampling_box.excessive_radius) {
-        this->excessive_sampling_radius_i_seqs_.push_back(i_seq);
-      }
-      this->update_sampling_box_statistics(
-        sampling_box.n_points, sampling_box.box_edges);
+      box_excessive_radius[i_seq] = sampling_box.excessive_radius;
+      box_n_points[i_seq] = sampling_box.n_points;
+      box_edges[i_seq] = sampling_box.box_edges;
+      box_min[i_seq] = sampling_box.box_min;
+      box_sampled[i_seq] = 1;
+      if (box_only) return;
       if (sampled_density_must_be_positive) {
         if (   gaussian_ft.rho_real_0() < 0
             || gaussian_ft.rho_real(sampling_box.max_d_sq) < 0) {
@@ -164,7 +206,7 @@ namespace cctbx { namespace xray {
         gaussian_ft = detail::gaussian_fourier_transformed<FloatType>(
           exp_table,
           gaussian, scatterer.fp, scatterer.fdp, scatterer.weight(),
-          *u_cart++, this->u_extra_);
+          this->u_cart_cache_[i_u_cart[i_seq]], this->u_extra_);
       }
       if (gifes != 0) {
         grid_indices_for_one_scatterer.reserve(sampling_box.n_points);
@@ -229,12 +271,124 @@ namespace cctbx { namespace xray {
           grid_indices_for_one_scatterer.end());
         grid_indices_for_one_scatterer.clear();
       }
+      }
+      catch (...) {
+        errors[i_seq] = std::current_exception();
+      }
+    };
+    // With OpenMP, the grid is divided into blocks along the first two axes
+    // that are at least as large as the largest sampling box, and each
+    // scatterer is assigned to the block containing the start of its
+    // sampling box; the scatterers of block (i,j) can only change the grid
+    // points of blocks i..i+1, j..j+1. The blocks are sampled in four passes
+    // (i and j even or odd); in each pass the blocks are sampled in parallel
+    // (one thread per block, in i_seq order within a block). The result
+    // does not depend on the number of threads (but the order of the
+    // additions differs from that of the serial calculation).
+    int n_threads = 1;
+#if defined(_OPENMP)
+    if (map_begin != 0 && n_seq >= CCTBX_XRAY_SAMPLING_OPENMP_MIN_SCATTERERS) {
+      n_threads = std::max(1, omp_get_max_threads());
     }
-    CCTBX_ASSERT(u_radius == this->u_radius_cache_.end());
-    CCTBX_ASSERT(u_cart == this->u_cart_cache_.end());
+#endif
+    int n_blocks[2] = {0, 0};
+    std::vector<std::vector<std::size_t> > blocks;
+    if (n_threads > 1) {
+      std::vector<work_t> work(n_threads, work_t(exp_table_one_over_step_size));
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(dynamic, 64) num_threads(n_threads)
+#endif
+      for(long i_seq=0;i_seq<static_cast<long>(n_seq);i_seq++) {
+        int i_thread = 0;
+#if defined(_OPENMP)
+        i_thread = omp_get_thread_num();
+#endif
+        sample(static_cast<std::size_t>(i_seq), work[i_thread], true);
+      }
+      for(int axis=0;axis<2;axis++) {
+        int max_edge = 1;
+        for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+          if (box_sampled[i_seq]) {
+            max_edge = std::max(max_edge,
+              static_cast<int>(box_edges[i_seq][axis]));
+          }
+        }
+        // an even number of blocks (wrapping around), or a single block
+        int n = static_cast<int>(grid_f[axis]) / max_edge;
+        if (n % 2) n--;
+        n_blocks[axis] = std::max(n, 1);
+      }
+      if (n_blocks[0] * n_blocks[1] >= 8) {
+        blocks.resize(n_blocks[0] * n_blocks[1]);
+        for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+          if (!box_sampled[i_seq]) continue;
+          int i_block[2];
+          for(int axis=0;axis<2;axis++) {
+            int n_g = static_cast<int>(grid_f[axis]);
+            int n_b = n_blocks[axis];
+            int g = scitbx::math::mod_positive(box_min[i_seq][axis], n_g);
+            // block i covers the grid points [i*n_g/n_b, (i+1)*n_g/n_b)
+            int i_b = static_cast<int>(static_cast<long>(g) * n_b / n_g);
+            while (static_cast<long>(i_b) * n_g / n_b > g) i_b--;
+            while (static_cast<long>(i_b+1) * n_g / n_b <= g) i_b++;
+            i_block[axis] = i_b;
+          }
+          blocks[i_block[0] * n_blocks[1] + i_block[1]].push_back(i_seq);
+        }
+      }
+    }
+    if (blocks.size() == 0) {
+      work_t work(exp_table_one_over_step_size);
+      for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+        sample(i_seq, work, false);
+      }
+      this->exp_table_size_ = work.exp_table.table().size();
+    }
+    else {
+      std::vector<work_t> work(n_threads, work_t(exp_table_one_over_step_size));
+      for(int pass=0;pass<4;pass++) {
+        int p0 = pass / 2, p1 = pass % 2;
+        if (   (p0 == 1 && n_blocks[0] == 1)
+            || (p1 == 1 && n_blocks[1] == 1)) continue;
+        int m0 = std::max(1, n_blocks[0] / 2);
+        int m1 = std::max(1, n_blocks[1] / 2);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(n_threads)
+#endif
+        for(long k=0;k<static_cast<long>(m0)*m1;k++) {
+          int i_thread = 0;
+#if defined(_OPENMP)
+          i_thread = omp_get_thread_num();
+#endif
+          int i0 = (n_blocks[0] == 1 ? 0 : 2 * static_cast<int>(k / m1) + p0);
+          int i1 = (n_blocks[1] == 1 ? 0 : 2 * static_cast<int>(k % m1) + p1);
+          std::vector<std::size_t> const& block =
+            blocks[i0 * n_blocks[1] + i1];
+          for(std::size_t i=0;i<block.size();i++) {
+            sample(block[i], work[i_thread], false);
+          }
+        }
+      }
+      this->exp_table_size_ = 0;
+      for(int i=0;i<n_threads;i++) {
+        this->exp_table_size_ = std::max(this->exp_table_size_,
+          work[i].exp_table.table().size());
+      }
+    }
+    // the first error (in i_seq order), as without OpenMP
+    for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+      if (errors[i_seq]) std::rethrow_exception(errors[i_seq]);
+    }
+    for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+      if (!box_sampled[i_seq]) continue;
+      if (box_excessive_radius[i_seq]) {
+        this->excessive_sampling_radius_i_seqs_.push_back(i_seq);
+      }
+      this->update_sampling_box_statistics(
+        box_n_points[i_seq], box_edges[i_seq]);
+    }
     this->u_radius_cache_ = u_radius_cache_t(); // free memory
     this->u_cart_cache_ = u_cart_cache_t(); // free memory
-    this->exp_table_size_ = exp_table.table().size();
   }
 
 }} // namespace cctbx::xray

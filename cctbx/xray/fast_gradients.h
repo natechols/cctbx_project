@@ -4,6 +4,12 @@
 #include <cctbx/xray/sampling_base.h>
 #include <cctbx/xray/packing_order.h>
 #include <cctbx/sgtbx/site_symmetry_table.h>
+#include <scitbx/array_family/tiny.h>
+#include <algorithm>
+#include <exception>
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 namespace cctbx { namespace xray {
 
@@ -554,22 +560,67 @@ namespace cctbx { namespace xray {
     }
     grid_point_type const& grid_f = this->map_accessor_.focus();
     grid_point_type const& grid_a = this->map_accessor_.all();
-    detail::exponent_table<FloatType>
-      exp_table(this->exp_table_one_over_step_size_);
     scitbx::mat3<FloatType>
       orth_mx = this->unit_cell_.orthogonalization_matrix();
-    std::vector<int> gp1g;
-    std::vector<FloatType> o1f1_;
-    std::vector<FloatType> o4f1_;
-    std::vector<int> gp2g;
-    std::vector<FloatType> o2f2_;
-    std::vector<FloatType> o5f2_;
-    std::vector<FloatType> o8f2_;
-    typename u_radius_cache_t::const_iterator u_radius =
-      this->u_radius_cache_.begin();
-    typename u_cart_cache_t::const_iterator u_cart =
-      this->u_cart_cache_.begin();
-    for(std::size_t i_seq=0;i_seq<scatterers.size();i_seq++) {
+    // The gradients of the scatterers are computed in parallel (OpenMP),
+    // each thread with its own exponent table and work arrays, and packed
+    // in i_seq order afterwards; the result does not depend on the number
+    // of threads.
+    std::size_t n_seq = scatterers.size();
+    // positions in the u_radius and u_cart caches
+    std::vector<std::size_t> i_u_radius(n_seq, 0);
+    std::vector<std::size_t> i_u_cart(n_seq, 0);
+    {
+      std::size_t i_r = 0, i_c = 0;
+      for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+        XrayScattererType const& scatterer = scatterers[i_seq];
+        if (scatterer.weight() == 0) continue;
+        i_u_radius[i_seq] = i_r++;
+        if (scatterer.flags.use_u_aniso()) i_u_cart[i_seq] = i_c++;
+      }
+      CCTBX_ASSERT(i_r == this->u_radius_cache_.size());
+      CCTBX_ASSERT(i_c == this->u_cart_cache_.size());
+    }
+    // site (3), b_iso, b_cart (6), occupancy, fp, fdp
+    typedef af::tiny<FloatType, 13> gradients_t;
+    gradients_t zero_gradients;
+    zero_gradients.fill(0);
+    std::vector<gradients_t> gradients(n_seq, zero_gradients);
+    // sampling box statistics of each scatterer (merged in i_seq order)
+    std::vector<std::size_t> box_n_points(n_seq, 0);
+    std::vector<grid_point_type> box_edges(n_seq, grid_point_type(0,0,0));
+    std::vector<char> box_sampled(n_seq, 0);
+    std::vector<char> box_excessive_radius(n_seq, 0);
+    std::vector<std::exception_ptr> errors(n_seq);
+    int n_threads = 1;
+#if defined(_OPENMP)
+    if (n_seq >= CCTBX_XRAY_SAMPLING_OPENMP_MIN_SCATTERERS) {
+      n_threads = std::max(1, omp_get_max_threads());
+    }
+#endif
+    std::vector<std::size_t> exp_table_sizes(n_threads, 0);
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(n_threads)
+#endif
+    {
+      int i_thread = 0;
+#if defined(_OPENMP)
+      i_thread = omp_get_thread_num();
+#endif
+      detail::exponent_table<FloatType>
+        exp_table(this->exp_table_one_over_step_size_);
+      std::vector<int> gp1g;
+      std::vector<FloatType> o1f1_;
+      std::vector<FloatType> o4f1_;
+      std::vector<int> gp2g;
+      std::vector<FloatType> o2f2_;
+      std::vector<FloatType> o5f2_;
+      std::vector<FloatType> o8f2_;
+#if defined(_OPENMP)
+#pragma omp for schedule(dynamic, 16)
+#endif
+    for(long i_seq_=0;i_seq_<static_cast<long>(n_seq);i_seq_++) {
+      std::size_t i_seq = static_cast<std::size_t>(i_seq_);
       XrayScattererType const& scatterer = scatterers[i_seq];
       //
       FloatType gr_site_0(0), gr_site_1(0), gr_site_2(0);
@@ -584,6 +635,7 @@ namespace cctbx { namespace xray {
                    && scatterer.flags.use_u_iso()
                    && scatterer.flags.grad_u_iso();
       if (scatterer.weight() != 0) {
+      try {
         eltbx::xray_scattering::gaussian const&
           gaussian = scattering_type_registry.gaussian_not_optional(
             scatterer.scattering_type);
@@ -595,16 +647,15 @@ namespace cctbx { namespace xray {
           exp_table,
           gaussian, scatterer.fp, scatterer.fdp,
           scatterer.weight_without_occupancy(), scatterer.weight(),
-          *u_radius++, this->u_extra_);
+          this->u_radius_cache_[i_u_radius[i_seq]], this->u_extra_);
         detail::calc_box<FloatType, grid_point_type, XrayScattererType>
           sampling_box(
             this->unit_cell_, this->rho_cutoff_, this->max_d_sq_upper_bound_,
             grid_f, coor_frac, gaussian_ft);
-        if (sampling_box.excessive_radius) {
-          this->excessive_sampling_radius_i_seqs_.push_back(i_seq);
-        }
-        this->update_sampling_box_statistics(
-          sampling_box.n_points, sampling_box.box_edges);
+        box_excessive_radius[i_seq] = sampling_box.excessive_radius;
+        box_n_points[i_seq] = sampling_box.n_points;
+        box_edges[i_seq] = sampling_box.box_edges;
+        box_sampled[i_seq] = 1;
         if (sampled_density_must_be_positive) {
           if (   gaussian_ft.rho_real_0() < 0
               || gaussian_ft.rho_real(sampling_box.max_d_sq) < 0) {
@@ -619,7 +670,7 @@ namespace cctbx { namespace xray {
             exp_table,
             gaussian, scatterer.fp, scatterer.fdp,
             scatterer.weight_without_occupancy(), scatterer.weight(),
-            *u_cart++, this->u_extra_);
+            this->u_cart_cache_[i_u_cart[i_seq]], this->u_extra_);
         }
 #       include <cctbx/xray/sampling_loop.h>
           FloatType f_real(-1.e20); // could be uninitialized
@@ -710,6 +761,44 @@ namespace cctbx { namespace xray {
         CCTBX_XRAY_SAMPLING_LOOP_END
         if (need_iso) gr_b_iso = gr_b_cart_0 + gr_b_cart_1 + gr_b_cart_2;
       }
+      catch (...) {
+        errors[i_seq] = std::current_exception();
+      }
+      }
+      gradients_t& g = gradients[i_seq];
+      g[0] = gr_site_0; g[1] = gr_site_1; g[2] = gr_site_2;
+      g[3] = gr_b_iso;
+      g[4] = gr_b_cart_0; g[5] = gr_b_cart_1; g[6] = gr_b_cart_2;
+      g[7] = gr_b_cart_3; g[8] = gr_b_cart_4; g[9] = gr_b_cart_5;
+      g[10] = gr_occupancy; g[11] = gr_fp; g[12] = gr_fdp;
+    }
+      exp_table_sizes[i_thread] = exp_table.table().size();
+    }
+    // the first error (in i_seq order), as without OpenMP
+    for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+      if (errors[i_seq]) std::rethrow_exception(errors[i_seq]);
+    }
+    for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+      if (!box_sampled[i_seq]) continue;
+      if (box_excessive_radius[i_seq]) {
+        this->excessive_sampling_radius_i_seqs_.push_back(i_seq);
+      }
+      this->update_sampling_box_statistics(
+        box_n_points[i_seq], box_edges[i_seq]);
+    }
+    for(std::size_t i_seq=0;i_seq<n_seq;i_seq++) {
+      XrayScattererType const& scatterer = scatterers[i_seq];
+      bool need_iso = scatterer.flags.use_u_aniso()
+                   && scatterer.flags.use_u_iso()
+                   && scatterer.flags.grad_u_iso();
+      gradients_t const& g = gradients[i_seq];
+      FloatType gr_site_0(g[0]), gr_site_1(g[1]), gr_site_2(g[2]);
+      FloatType gr_b_iso(g[3]);
+      FloatType gr_b_cart_0(g[4]), gr_b_cart_1(g[5]), gr_b_cart_2(g[6]),
+                gr_b_cart_3(g[7]), gr_b_cart_4(g[8]), gr_b_cart_5(g[9]);
+      FloatType gr_occupancy(g[10]);
+      FloatType gr_fp(g[11]);
+      FloatType gr_fdp(g[12]);
       if (scatterer.flags.grad_site()) {
         average_special_position_site_gradient(
           site_symmetry_table, i_seq, gr_site_0, gr_site_1, gr_site_2);
@@ -806,15 +895,14 @@ namespace cctbx { namespace xray {
           d_target_d_fdp_.push_back(0);
         }
       }
-    }
+        }
     if (n_parameters != 0) {
       CCTBX_ASSERT(packed_.size() == n_parameters);
     }
-    CCTBX_ASSERT(u_radius == this->u_radius_cache_.end());
-    CCTBX_ASSERT(u_cart == this->u_cart_cache_.end());
     this->u_radius_cache_ = u_radius_cache_t(); // free memory
     this->u_cart_cache_ = u_cart_cache_t(); // free memory
-    this->exp_table_size_ = exp_table.table().size();
+    this->exp_table_size_ = *std::max_element(
+      exp_table_sizes.begin(), exp_table_sizes.end());
   }
 
 }} // namespace cctbx::xray

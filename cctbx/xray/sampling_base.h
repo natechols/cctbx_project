@@ -4,6 +4,12 @@
 #include <cctbx/xray/scattering_type_registry.h>
 #include <scitbx/array_family/accessors/c_grid_padded_periodic.h>
 
+// Smallest number of scatterers for which the sampling of the density
+// (sampled_model_density) and of the gradients (fast_gradients) uses OpenMP
+#if !defined(CCTBX_XRAY_SAMPLING_OPENMP_MIN_SCATTERERS)
+#define CCTBX_XRAY_SAMPLING_OPENMP_MIN_SCATTERERS 500
+#endif
+
 namespace cctbx { namespace xray {
 
   namespace detail {
