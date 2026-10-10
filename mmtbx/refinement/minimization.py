@@ -201,6 +201,9 @@ class lbfgs(object):
     self.compute_target(compute_gradients = False,u_iso_refinable_params = None)
     if(self.refine_adp and self.fmodels.fmodel_neutron() is None):
       self.xray_structure.tidy_us()
+      if(self._riding is not None):
+        # (tidy_us may change the ADPs of the parent atoms)
+        self._apply_riding()
       self.fmodels.update_xray_structure(
         xray_structure = self.xray_structure,
         update_f_calc  = True)
