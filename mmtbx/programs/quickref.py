@@ -977,14 +977,16 @@ Usage examples:
     # to the ADPs again (tls_from_u_cart), which takes about as long as the
     # TLS refinement itself and does not lower R-free.
     if (first and not self.tls_presplit):
-      # (tls_refinement would fit with 100 macro-cycles of 100 iterations
-      # for each of three parameter subsets; 10 macro-cycles converge)
+      # (tls_refinement would fit with 100 macro-cycles of up to 100
+      # iterations for each of three parameter subsets, most of them after
+      # convergence; small groups may not converge)
       self.model.tls_groups.tlsos = tools.tls_from_u_cart(
         xray_structure         = xrs,
         tlsos_initial          = self.model.tls_groups.tlsos,
         tls_selections         = self.tls_selections,
         number_of_macro_cycles = 10,
-        max_iterations         = 100)
+        max_iterations         = 100,
+        convergence_tolerance  = 1.e-6)
     start_tls_value = self.model.tls_groups.tlsos
     target_name = fmodel.target_name
     fmodel.update(target_name = "ls_wunit_k1")

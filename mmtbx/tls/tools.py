@@ -347,7 +347,15 @@ def tls_from_uanisos(xray_structure,
                      refine_S                     = True,
                      verbose                      = -1,
                      enforce_positive_definite_TL = True,
-                     out                          = None):
+                     out                          = None,
+                     convergence_tolerance        = None):
+  """
+  With convergence_tolerance, the macro-cycles of a group stop when the
+  minimization of a macro-cycle needs at most one iteration (i.e. it starts
+  at the minimum) and decreases the target by less than
+  convergence_tolerance * target. (Without it, all number_of_macro_cycles
+  are done, typically with one iteration each after convergence.)
+  """
   global time_tls_from_uanisos
   t1 = time.time()
   if(out is None): out = sys.stdout
@@ -389,6 +397,11 @@ def tls_from_uanisos(xray_structure,
       else:          assert approx_equal(L_initial, minimized.L_min)
       if(refine_S):  S_initial = minimized.S_min
       else:          assert approx_equal(S_initial, minimized.S_min)
+      target_stop = minimized.f
+      if(convergence_tolerance is not None and i > 1 and
+         minimized.minimizer.iter() <= 1 and
+         target_start - target_stop <= convergence_tolerance*abs(target_start)):
+        break
     if(verbose > 0):
       print("TLS group %d: minimized target = " %(group_counter),minimized.f, file=out)
     T_min_ = minimized.T_min
@@ -813,7 +826,8 @@ def tls_from_u_cart(xray_structure,
                     tlsos_initial,
                     tls_selections,
                     number_of_macro_cycles = 100,
-                    max_iterations         = 100):
+                    max_iterations         = 100,
+                    convergence_tolerance  = None):
   global time_tls_from_u_cart
   timer = user_plus_sys_time()
   uc = xray_structure.unit_cell()
@@ -865,7 +879,8 @@ def tls_from_u_cart(xray_structure,
                               refine_L               = rl,
                               refine_S               = rs,
                               verbose                = -1,
-                              out                    = None)
+                              out                    = None,
+                              convergence_tolerance  = convergence_tolerance)
     tlsos = tlsos_
   t = []
   l = []
