@@ -2827,9 +2827,10 @@ class manager(object):
       ncs_torsion_params,
       sites_individual,
       log):
-    check_for_internal_chain_ter_records(
-        pdb_hierarchy = self.get_hierarchy(),
-        ter_indices   = self._ter_indices)
+    if self._ter_indices is not None:
+      check_for_internal_chain_ter_records(
+          pdb_hierarchy = self.get_hierarchy(),
+          ter_indices   = self._ter_indices)
     ncs_obj = self.get_ncs_obj()
     if ncs_obj is None: return
     geometry = self.get_restraints_manager().geometry

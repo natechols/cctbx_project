@@ -49,8 +49,10 @@ def exercise(model_file, data_file):
     assert r.r_work < 0.7 * r.r_work_start, (extra_args, r.r_work_start,
       r.r_work)
     assert os.path.isfile(r.model_file_name)
-    model = iotbx.pdb.input(file_name=r.model_file_name)
-    assert model.atoms().size() == 67
+    # (with riding hydrogens added)
+    atoms = iotbx.pdb.input(file_name=r.model_file_name).atoms()
+    assert atoms.extract_element().count(" H") > 40
+    assert (atoms.extract_element() != " H").count(True) == 67
     if ("write_map_coefficients=False" in extra_args):
       assert r.mtz_file_name is None
     else:
@@ -61,23 +63,37 @@ def exercise(model_file, data_file):
       assert "2FOFCWT,PH2FOFCWT" in labels, labels
       assert "FOFCWT,PHFOFCWT" in labels, labels
 
-def exercise_hydrogens(data_file):
-  # models with hydrogens are refused unless they are removed
-  lines = pdb_str.splitlines()
-  i = [k for k, l in enumerate(lines) if l.startswith("ATOM")][0]
-  h = lines[i][:12] + " H  " + lines[i][16:76] + " H"
-  model_file = "tst_quickref_h.pdb"
-  with open(model_file, "w") as f:
-    f.write("\n".join(lines[:i+1] + [h] + lines[i+1:]) + "\n")
-  try:
-    run_quickref(model_file, data_file, "tst_quickref_h",
-      ["number_of_macro_cycles=1"])
-  except Sorry as e:
-    assert "hydrogen" in str(e)
-  else:
-    raise AssertionError("Sorry expected")
-  r = run_quickref(model_file, data_file, "tst_quickref_h",
-    ["number_of_macro_cycles=1", "remove_hydrogens=True"])
+def exercise_hydrogens(model_file, data_file):
+  """riding hydrogens: added, kept (riding) or removed"""
+  import io, re
+  log = io.StringIO()
+  r = run_program(program_class=quickref.Program, args=[model_file,
+    data_file, "output.prefix=tst_quickref_h", "output.overwrite=True",
+    "number_of_macro_cycles=2", "add_hydrogens=True"], logger=log)
+  text = log.getvalue()
+  n_added = int(re.search("Hydrogens added: ([0-9]+)", text).group(1))
+  assert n_added > 40, text
+  assert "Riding hydrogens: %d" % n_added in text, text
+  assert r.r_work < r.r_work_start
+  # output: hydrogens with the B-factors of their parent atoms
+  model_h = r.model
+  xrs = model_h.get_xray_structure()
+  b = xrs.extract_u_iso_or_u_equiv()
+  for rc in model_h.riding_h_manager.parameterization_cpp:
+    assert approx_equal(b[rc.ih], b[rc.a0])
+  pdb_inp = iotbx.pdb.input(file_name=r.model_file_name)
+  h_file = r.model_file_name
+  assert pdb_inp.atoms().size() == 67 + n_added
+  # input with hydrogens: riding
+  log = io.StringIO()
+  r = run_program(program_class=quickref.Program, args=[h_file, data_file,
+    "output.prefix=tst_quickref_h2", "output.overwrite=True",
+    "number_of_macro_cycles=1"], logger=log)
+  assert "Riding hydrogens: %d" % n_added in log.getvalue(), log.getvalue()
+  # removed
+  r = run_quickref(h_file, data_file, "tst_quickref_h3",
+    ["number_of_macro_cycles=1", "remove_hydrogens=True",
+     "add_hydrogens=False"])
   assert iotbx.pdb.input(file_name=r.model_file_name).atoms().size() == 67
 
 def exercise_occupancies():
@@ -153,7 +169,9 @@ def exercise_anisotropic(data_file):
     assert r.r_free < r.r_free_start
     xrs_final = r.model.get_xray_structure()
     assert xrs_final.use_u_aniso().all_eq(True)
-    u_final = xrs_final.scatterers().extract_u_star()
+    # (riding hydrogens are added: non-H atoms only)
+    u_final = xrs_final.scatterers().extract_u_star().select(
+      ~r.model.get_hd_selection())
     changed = flex.max(flex.abs(u_final.as_double() - u_start.as_double()))
     # (round-off from u_star <-> u_cart conversions is ~1.e-11)
     if (adp_type == "anisotropic"): assert changed > 1.e-6, changed
@@ -215,7 +233,9 @@ def exercise_reference_coordinate_restraints():
       data_file, "output.prefix=tst_quickref_ref", "output.overwrite=True",
       "number_of_macro_cycles=2", "write_map_coefficients=False",
       "refinement.adp=False"] + args, logger=log)
-    rmsd[key] = r.model.get_sites_cart().rms_difference(sites_start)
+    # (non-H atoms: riding hydrogens are added)
+    rmsd[key] = r.model.get_sites_cart().select(
+      ~r.model.get_hd_selection()).rms_difference(sites_start)
     if (key != "none"):
       assert "Reference coordinate restraints" in log.getvalue()
     assert r.r_work < r.r_work_start
@@ -269,7 +289,9 @@ def exercise_input_tls():
     log = io.StringIO()
     r = run_program(program_class=quickref.Program, args=[model_file,
       data_file, "output.prefix=tst_quickref_tls", "output.overwrite=True",
-      "number_of_macro_cycles=1", "write_map_coefficients=False"] + args,
+      "number_of_macro_cycles=1", "write_map_coefficients=False",
+      # (the data are calculated without hydrogens)
+      "add_hydrogens=False"] + args,
       logger=log)
     return r, log.getvalue()
   # (without TLS refinement)
@@ -340,7 +362,9 @@ def exercise_groups():
     log = io.StringIO()
     r = run_program(program_class=quickref.Program, args=[model_file,
       data_file, "output.prefix=tst_quickref_groups", "output.overwrite=True",
-      "number_of_macro_cycles=3", "write_map_coefficients=False"] + args,
+      "number_of_macro_cycles=3", "write_map_coefficients=False",
+      # (the data are calculated without hydrogens)
+      "add_hydrogens=False"] + args,
       logger=log)
     return r, log.getvalue()
   # rigid body (with individual ADPs): chain B back in place, rigidly
@@ -458,7 +482,7 @@ def run():
   exercise_anisotropic(data_file)
   exercise_reproducibility(model_file, data_file)
   exercise(model_file, data_file)
-  exercise_hydrogens(data_file)
+  exercise_hydrogens(model_file, data_file)
   exercise_occupancies()
   exercise_ncs()
   exercise_reference_coordinate_restraints()

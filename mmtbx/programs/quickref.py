@@ -226,8 +226,14 @@ random_seed = 2679941
           (ADPs are perturbed before the ADP weight is computed)
 remove_hydrogens = False
   .type = bool
-  .help = Remove hydrogen atoms before refinement (required if the model \
-          contains hydrogens, riding hydrogens are not supported)
+  .help = Remove hydrogen atoms of the input model before refinement \
+          (with add_hydrogens=True, all hydrogens are placed anew). \
+          Hydrogens ride on their parent atoms, with the ADPs of the \
+          parent atoms.
+add_hydrogens = True
+  .type = bool
+  .help = Add riding hydrogens with mmtbx.hydrogens.reduce_hydrogen \
+          (existing hydrogens are kept unless remove_hydrogens=True)
 output
 {
   write_map_coefficients = True
@@ -303,10 +309,8 @@ Usage examples:
     self.model_input = model.get_model_input()
     if (model.crystal_symmetry() is None):
       raise Sorry("The model has no crystal symmetry.")
-    if (model.get_hd_selection().count(True) > 0):
-      if (not self.params.remove_hydrogens):
-        raise Sorry("The model contains hydrogen atoms, which are not "
-          "supported. Use remove_hydrogens=True to remove them.")
+    if (model.get_hd_selection().count(True) > 0
+        and self.params.remove_hydrogens):
       model = model.select(~model.get_hd_selection())
       self.data_manager.add_model(model_name, model)
       print("Hydrogen atoms removed.", file=log)
@@ -317,6 +321,16 @@ Usage examples:
       model_filename   = model_name)
     model.set_log(null_out()) # restraints processing is verbose
     model.process(make_restraints=True)
+    if (self.params.add_hydrogens):
+      model = self._add_hydrogens(model)
+    if (model.get_hd_selection().count(True) > 0):
+      model.setup_riding_h_manager(idealize = True)
+      n_h = model.get_hd_selection().count(True)
+      n_riding = len(model.riding_h_manager.parameterization_cpp)
+      print("Riding hydrogens: %d%s" % (n_riding, "" if n_riding == n_h else
+        " (%d hydrogens without riding parameterization are fixed)" % (
+        n_h - n_riding)), file=log)
+      self._riding_h_adps_from_parents(model)
     model.set_log(log)
     self.model = model
     fmodel.update_xray_structure(
@@ -471,6 +485,7 @@ Usage examples:
       r = u_residual[i_seq]
       u_total[i_seq] = (u[0]+r, u[1]+r, u[2]+r, u[3], u[4], u[5])
     xrs_tls.set_u_cart(u_cart = u_total, selection = tls_isel)
+    self._riding_h_adps_from_parents(model, xrs_tls)
     apply = (mode == "apply")
     if (mode == "auto"):
       def r_work(x):
@@ -498,6 +513,50 @@ Usage examples:
       tlsos      = tlsos,
       u_tls      = u_tls,
       u_residual = u_residual)
+
+  def _riding_h_adps_from_parents(self, model, xrs = None):
+    """Riding hydrogens have the ADPs (isotropic or anisotropic) of their
+    parent atoms from the start, so that the choice of refinable ADPs
+    (adp_type) is the same for hydrogens and parent atoms. Without xrs,
+    the ADPs of the model are changed."""
+    if (model.riding_h_manager is None): return
+    set_model = (xrs is None)
+    if (set_model):
+      xrs = model.get_xray_structure()
+    scatterers = xrs.scatterers()
+    for rc in model.riding_h_manager.parameterization_cpp:
+      h, parent = scatterers[rc.ih], scatterers[rc.a0]
+      if (parent.flags.use_u_aniso()):
+        h.convert_to_anisotropic(unit_cell = xrs.unit_cell())
+        h.u_star = parent.u_star
+      else:
+        h.convert_to_isotropic(unit_cell = xrs.unit_cell())
+        h.u_iso = parent.u_iso
+    if (set_model):
+      model.set_xray_structure(xrs)
+
+  def _add_hydrogens(self, model):
+    """Riding hydrogens (B of the parent atoms) with reduce_hydrogen."""
+    from mmtbx.hydrogens import reduce_hydrogen
+    n_before = model.get_hd_selection().count(True)
+    result = None
+    # the charged N-terminus requires the chemical components library
+    for n_terminal_charge in ["residue_one", "no_charge"]:
+      try:
+        rh = reduce_hydrogen.place_hydrogens(model = model,
+          n_terminal_charge = n_terminal_charge, keep_existing_H = True)
+        rh.run()
+        result = rh.get_model()
+        break
+      except Exception as e:
+        error = e
+    if (result is None):
+      raise Sorry("Hydrogens could not be added: %s" % str(error))
+    result.set_log(null_out())
+    result.process(make_restraints = True)
+    print("Hydrogens added: %d" % (
+      result.get_hd_selection().count(True) - n_before), file=self.logger)
+    return result
 
   def _resolved_adp_type(self):
     p = self.params.refinement
@@ -760,7 +819,8 @@ Usage examples:
       add_coordinate_restraints, \
       exclude_outliers_from_reference_restraints_selection
     model = self.model
-    selection = model.selection(p.selection)
+    # (riding hydrogens follow their parent atoms)
+    selection = model.selection(p.selection) & ~model.get_hd_selection()
     if (p.exclude_outliers):
       hierarchy = model.get_hierarchy()
       hierarchy.atoms().reset_i_seq()
@@ -876,6 +936,9 @@ Usage examples:
           compute_gradients=True).gradients
       finally:
         rm.cartesian_ncs_manager = ncs_manager
+      # riding hydrogens are not parameters
+      not_h = ~self.model.get_hd_selection()
+      g_x, g_c = g_x.select(not_h), g_c.select(not_h)
       if (g_c.norm() == 0 or g_x.norm() == 0):
         wxc = 1.0
       else:
@@ -948,7 +1011,8 @@ Usage examples:
       occupancy_groups         = occupancy_groups,
       occupancy_min            = p.occupancy_min,
       occupancy_max            = p.occupancy_max,
-      smooth_target            = p.smooth_target)
+      smooth_target            = p.smooth_target,
+      riding_h                 = (self.model.riding_h_manager is not None))
     return m.minimizer.iter()
 
   def _refine_occupancies(self):

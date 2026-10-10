@@ -48,7 +48,8 @@ class lbfgs(object):
                      occupancy_groups         = None,
                      occupancy_min            = 0.0,
                      occupancy_max            = 1.0,
-                     smooth_target            = False):
+                     smooth_target            = False,
+                     riding_h                 = False):
     """
     occupancy_groups (e.g. from mmtbx.refinement.occupancies.
     occupancy_selections) are refined simultaneously with the coordinates
@@ -82,6 +83,19 @@ class lbfgs(object):
     target is flat along truncated parameters) but is kept: without it the
     ADPs drift much further in each minimization, which made the results
     worse at low resolution (the truncation acts as a regularization).
+
+    If riding_h is True (requires model.riding_h_manager), the hydrogen
+    atoms ride on their parent atoms and are not parameters: after each
+    shift their positions are idealized from the parent atoms, and their
+    ADPs (u_iso, and u_aniso if the parent is anisotropic) are those of the
+    parent atoms. The gradients with respect to the hydrogen positions are
+    added to those of the parent atoms (and their neighbors) with the chain
+    rule of the riding model; the gradients and curvatures with respect to
+    the hydrogen ADPs, and the curvatures with respect to the hydrogen
+    positions, are added to those of the parent atoms. This also works for
+    simultaneous refinement of coordinates, ADPs and occupancies (unlike
+    the riding model without riding_h, which keeps the hydrogen positions
+    as parameters with zero shifts).
     """
     timer = user_plus_sys_time()
     adopt_init_args(self, locals())
@@ -118,9 +132,11 @@ class lbfgs(object):
     #   wxc*Exray + wc*Echem + wxc/wxu*wu*Eadp
     self.adp_restraints_weight = self.weights.w
     if(refine_xyz and refine_adp):
-      if(self.riding_h_manager_is_present()):
-        raise Sorry("Simultaneous refinement of coordinates and ADPs is not"
-          " available with riding hydrogens.")
+      if(self.riding_h_manager_is_present() and not riding_h):
+        # the riding model without riding_h assumes that the parameters are
+        # the coordinates only (see apply_shifts)
+        raise Sorry("Simultaneous refinement of coordinates and ADPs with"
+          " riding hydrogens requires riding_h=True.")
       if(target_weights is not None):
         wa = target_weights.adp_weights_result
         self.adp_restraints_weight = wa.w * (
@@ -137,6 +153,11 @@ class lbfgs(object):
     if(self.collect_monitor): self.monitor.collect()
     self.neutron_refinement = (self.fmodels.fmodel_n is not None)
     self.riding_h_manager = self.model.riding_h_manager
+    self._riding = None
+    if(riding_h):
+      if(self.riding_h_manager is None):
+        raise Sorry("riding_h=True requires a riding hydrogen manager.")
+      self._setup_riding_h()
     self._setup_occupancy_groups()
     self._scatterers_start = self.xray_structure.scatterers()
     self._fixed_normalization = {}
@@ -174,7 +195,7 @@ class lbfgs(object):
       if(plain_pairs_radius is not None):
         geometry.plain_pairs_radius = plain_pairs_radius
     self.apply_shifts()
-    if(self._occ is not None):
+    if(self._occ is not None and len(self._occ.groups) > 0):
       self._finalize_occupancies()
     del self._scatterers_start
     self.compute_target(compute_gradients = False,u_iso_refinable_params = None)
@@ -203,13 +224,15 @@ class lbfgs(object):
     from mmtbx.refinement import occupancies
     self._occ = None
     groups = self.occupancy_groups
-    if(groups is None or len(groups) == 0):
+    if(groups is None): groups = []
+    if(len(groups) == 0 and self._riding is None):
       self.x = flex.double(self.xray_structure.n_parameters(), 0)
       return
-    if(self.riding_h_manager is not None):
-      raise Sorry("Simultaneous refinement of occupancies is not available"
-        " with riding hydrogens.")
-    if(self.neutron_refinement):
+    if(len(groups) > 0 and self.riding_h_manager is not None
+       and self._riding is None):
+      raise Sorry("Simultaneous refinement of occupancies with riding"
+        " hydrogens requires riding_h=True.")
+    if(len(groups) > 0 and self.neutron_refinement):
       raise Sorry("Simultaneous refinement of occupancies is not available"
         " for neutron refinement.")
     scatterers = self.xray_structure.scatterers()
@@ -218,7 +241,8 @@ class lbfgs(object):
     for group in groups:
       for sel in group:
         i_sel.extend(sel)
-    scatterers.flags_set_grad_occupancy(iselection = i_sel)
+    if(i_sel.size() > 0):
+      scatterers.flags_set_grad_occupancy(iselection = i_sel)
     n_full = self.xray_structure.n_parameters()
     mask = flex.double(n_full, 0)
     xray.minimization.add_gradients(
@@ -226,6 +250,12 @@ class lbfgs(object):
       xray_gradients      = mask,
       occupancy_gradients = flex.double(n_sc, 1))
     occ_slots = mask > 0
+    # parameters: all slots except the occupancies of the groups and the
+    # slots of riding hydrogens
+    other_slots = ~occ_slots
+    if(self._riding is not None):
+      self._riding_slot_maps(n_full)
+      other_slots = other_slots & ~self._riding.dependent_slots
     table = []
     par = flex.double()
     occ = scatterers.extract_occupancies()
@@ -237,14 +267,14 @@ class lbfgs(object):
         par.append(flex.mean(occ.select(sel)))
         sel_bools.append(flex.bool(n_sc, sel))
       table.append(indices)
-    n_other = occ_slots.count(False)
+    n_other = other_slots.count(True)
     self._occ = group_args(
       groups      = groups,
       table       = table,
       sel_bools   = sel_bools,
       i_sel       = i_sel,
       occ_slots   = occ_slots,
-      other_slots = ~occ_slots,
+      other_slots = other_slots,
       # occupancy slots are packed in the order of the atoms
       occ_atoms   = flex.bool(n_sc, i_sel).iselection(),
       n_full      = n_full,
@@ -252,6 +282,119 @@ class lbfgs(object):
       i_other     = flex.size_t(range(n_other)))
     self.x = flex.double(n_other, 0)
     self.x.extend(occupancies.pack_unpack(x = par, table = table))
+
+  def _setup_riding_h(self):
+    """Hydrogen atoms riding on their parent atoms (riding_h=True)."""
+    rhm = self.riding_h_manager
+    scatterers = self.xray_structure.scatterers()
+    n_sc = scatterers.size()
+    h_isel, p_isel = flex.size_t(), flex.size_t()
+    for rc in rhm.parameterization_cpp:
+      h_isel.append(rc.ih)
+      p_isel.append(rc.a0)
+    hd = rhm.hd_selection
+    assert hd.size() == n_sc
+    is_dependent = flex.bool(n_sc, False)
+    is_dependent.set_selected(h_isel, True)
+    # hydrogens without riding parameterization are kept fixed
+    fixed_h = (hd & ~is_dependent).iselection()
+    for i_seq in fixed_h:
+      scatterers[i_seq].flags.set_grads(False)
+    # the ADP model of each hydrogen is that of its parent
+    for i_h, i_p in zip(h_isel, p_isel):
+      fh, fp = scatterers[i_h].flags, scatterers[i_p].flags
+      if(fp.use_u_aniso() and not fh.use_u_aniso()):
+        scatterers[i_h].u_star = scatterers[i_p].u_star
+      fh.set_use_u_iso(fp.use_u_iso())
+      fh.set_use_u_aniso(fp.use_u_aniso())
+      fh.set_grad_u_iso(fp.grad_u_iso())
+      fh.set_grad_u_aniso(fp.grad_u_aniso())
+      fh.set_grad_site(fp.grad_site())
+    self._riding = group_args(
+      h_isel       = h_isel,
+      p_isel       = p_isel,
+      is_dependent = is_dependent,
+      h_bool       = is_dependent,
+      parameterization = rhm.parameterization_cpp)
+    self._apply_riding()
+
+  def _riding_slot_maps(self, n_full):
+    """
+    Positions of the site, u_iso and u_aniso parameters of each atom in the
+    full (packed by the scatterer flags) parameter array, and the slots of
+    the riding hydrogens (which are not parameters).
+    """
+    r = self._riding
+    scatterers = self.xray_structure.scatterers()
+    n_sc = scatterers.size()
+    def slots(**kwds):
+      codes = flex.double(n_full, 0)
+      xray.minimization.add_gradients(scatterers = scatterers,
+        xray_gradients = codes, **kwds)
+      sel = (codes > 0).iselection()
+      return sel, (codes.select(sel) - 1).iround().as_size_t()
+    r.site_slots, r.site_codes = slots(site_gradients = flex.vec3_double(
+      flex.double(range(1, 3*n_sc+1))))
+    r.u_iso_slots, r.u_iso_codes = slots(u_iso_gradients =
+      flex.double(range(1, n_sc+1)))
+    r.u_aniso_slots, r.u_aniso_codes = slots(u_aniso_gradients =
+      flex.sym_mat3_double(flex.double(range(1, 6*n_sc+1))))
+    dependent = flex.bool(n_full, False)
+    for sl, codes, k in [(r.site_slots, r.site_codes, 3),
+                         (r.u_iso_slots, r.u_iso_codes, 1),
+                         (r.u_aniso_slots, r.u_aniso_codes, 6)]:
+      atoms = codes / k
+      dependent.set_selected(sl.select(r.is_dependent.select(atoms)), True)
+    r.dependent_slots = dependent
+
+  def _apply_riding(self):
+    """Hydrogen positions from the parent atoms, hydrogen ADPs = parent
+    ADPs."""
+    r = self._riding
+    xrs = self.xray_structure
+    sites_cart = xrs.sites_cart()
+    self.riding_h_manager.idealize_riding_h_positions(sites_cart = sites_cart)
+    xrs.set_sites_cart(sites_cart)
+    scatterers = xrs.scatterers()
+    u_iso = scatterers.extract_u_iso()
+    u_iso.set_selected(r.h_isel, u_iso.select(r.p_isel))
+    scatterers.set_u_iso(u_iso, r.h_bool, xrs.unit_cell())
+    u_star = scatterers.extract_u_star()
+    u_star.set_selected(r.h_isel, u_star.select(r.p_isel))
+    scatterers.set_u_star(u_star)
+
+  def _fold_riding(self, full, curvatures = False):
+    """
+    Gradients (or curvatures) with respect to the full parameter array:
+    contributions of the riding hydrogens are added to the parent atoms.
+    """
+    from mmtbx_hydrogens_ext import modify_gradients_cpp
+    r = self._riding
+    n_sc = self.xray_structure.scatterers().size()
+    result = full.deep_copy()
+    # sites
+    s = flex.double(3*n_sc, 0)
+    s.set_selected(r.site_codes, full.select(r.site_slots))
+    s = flex.vec3_double(s)
+    if(curvatures):
+      s.add_selected(r.p_isel, s.select(r.h_isel))
+    else:
+      s = modify_gradients_cpp(
+        gradients        = s,
+        sites_cart       = self.xray_structure.sites_cart(),
+        parameterization = r.parameterization)
+    result.set_selected(r.site_slots, s.as_double().select(r.site_codes))
+    # ADPs: the hydrogen ADPs are those of the parent atoms
+    for slots, codes, k in [(r.u_iso_slots, r.u_iso_codes, 1),
+                            (r.u_aniso_slots, r.u_aniso_codes, 6)]:
+      if(slots.size() == 0): continue
+      u = flex.double(k*n_sc, 0)
+      u.set_selected(codes, full.select(slots))
+      # (components of each hydrogen added to those of its parent)
+      for c in range(k):
+        u.add_selected(r.p_isel * k + c, u.select(r.h_isel * k + c))
+      result.set_selected(slots, u.select(codes))
+    return result
 
   def _group_occupancies(self):
     from mmtbx.refinement import occupancies
@@ -263,6 +406,8 @@ class lbfgs(object):
     """Per-atom packed gradients or curvatures -> parameters."""
     from mmtbx.refinement import occupancies
     o = self._occ
+    if(self._riding is not None):
+      full = self._fold_riding(full, curvatures = curvatures)
     per_atom = flex.double(self.xray_structure.scatterers().size(), 0)
     per_atom.set_selected(o.occ_atoms, full.select(o.occ_slots))
     group_values = flex.double([flex.sum(per_atom.select(sel_bool))
@@ -327,7 +472,8 @@ class lbfgs(object):
       shifts.set_selected(self._u_iso_sel, u_shifts)
     if(o is not None):
       self.x.set_selected(o.i_other, shifts.select(o.other_slots))
-    if(self.riding_h_manager is not None and self.refine_xyz):
+    if(self.riding_h_manager is not None and self.refine_xyz
+       and self._riding is None):
       # temporary array with zero shifts for all atoms
       tmp = flex.vec3_double(self._scatterers_start.size(), [0,0,0])
       # Set shifts according to self.x
@@ -368,8 +514,10 @@ class lbfgs(object):
     if(o is not None):
       for value, sel_bool in zip(self._group_occupancies(), o.sel_bools):
         self.xray_structure.set_occupancies(value, sel_bool)
+    if(self._riding is not None):
+      self._apply_riding()
     #
-    if(self.riding_h_manager is not None and self.refine_xyz):
+    elif(self.riding_h_manager is not None and self.refine_xyz):
       sites_cart = self.xray_structure.sites_cart()
       self.riding_h_manager.idealize_riding_h_positions(
         sites_cart = sites_cart,

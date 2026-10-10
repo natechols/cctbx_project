@@ -129,6 +129,7 @@ general_tests = [
   "$D/regression/tst_ncs_curvatures.py",
   "$D/regression/tst_reference_coordinate_curvatures.py",
   "$D/regression/tst_group_curvatures.py",
+  "$D/regression/tst_riding_h_minimization.py",
   "$D/regression/tst_special_term_at_end.py",
   ["$D/ncs/ncs.py", "exercise"],
   "$D/regression/tst_adp_restraints.py",
