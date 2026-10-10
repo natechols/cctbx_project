@@ -96,11 +96,23 @@ namespace cctbx { namespace xray { namespace structure_factors {
           tabulate(scatterers, scattering_type_registry, b_iso_grid_step,
             tabulated);
         }
+        // The scatterers that are not tabulated are summed in parallel
+        // (OpenMP); the form factors are computed beforehand.
+        std::vector<std::size_t> direct;
         for(std::size_t i_sc=0;i_sc<scatterers.size();i_sc++) {
-          if (!tabulated[i_sc]) {
-            sum_directly(scatterers[i_sc], scattering_type_registry,
-              miller_indices, i_sc);
+          if (tabulated[i_sc]) continue;
+          direct.push_back(i_sc);
+          std::string const& t = scatterers[i_sc].scattering_type;
+          if (form_factor_cache_.find(t) == form_factor_cache_.end()) {
+            form_factor_cache_[t] = form_factors(scattering_type_registry, t);
           }
+        }
+        long n_direct = static_cast<long>(direct.size());
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(dynamic, 16) if (n_direct >= 64)
+#endif
+        for(long i=0;i<n_direct;i++) {
+          sum_directly(scatterers[direct[i]], miller_indices, direct[i]);
         }
       }
 
@@ -222,7 +234,13 @@ namespace cctbx { namespace xray { namespace structure_factors {
         }
         f_t n_s = static_cast<f_t>(r_transpose_.size());
         std::vector<sums_t> table(n_types * n_grid, sums_t(0,0,0,0,0));
-        for(std::size_t ig=0;ig<n_grid;ig++) {
+        // (the grid points are independent: OpenMP)
+        long n_grid_l = static_cast<long>(n_grid);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (n_grid >= 4)
+#endif
+        for(long ig_=0;ig_<n_grid_l;ig_++) {
+          std::size_t ig = static_cast<std::size_t>(ig_);
           f_t u = u_min + ig * du;
           for(std::size_t ih=0;ih<d_star_sq_.size();ih++) {
             f_t dss = d_star_sq_[ih];
@@ -269,20 +287,16 @@ namespace cctbx { namespace xray { namespace structure_factors {
         }
       }
 
+      // (form_factor_cache_ must contain the scattering type of sc)
       void
       sum_directly(
         scatterer<f_t> const& sc,
-        xray::scattering_type_registry const& scattering_type_registry,
         af::const_ref<miller::index<> > const& miller_indices,
         std::size_t i_sc)
       {
         typename std::map<std::string, af::shared<f_t> >::const_iterator
           cached = form_factor_cache_.find(sc.scattering_type);
-        if (cached == form_factor_cache_.end()) {
-          form_factor_cache_[sc.scattering_type] = form_factors(
-            scattering_type_registry, sc.scattering_type);
-          cached = form_factor_cache_.find(sc.scattering_type);
-        }
+        CCTBX_ASSERT(cached != form_factor_cache_.end());
         af::const_ref<f_t> f0 = cached->second.const_ref();
         f_t two_pi = scitbx::constants::two_pi;
         f_t n_s = static_cast<f_t>(r_transpose_.size());
