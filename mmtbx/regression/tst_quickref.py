@@ -168,7 +168,14 @@ def exercise_anisotropic(data_file):
       ["number_of_macro_cycles=2", "adp_type=%s" % adp_type])
     assert r.r_free < r.r_free_start
     xrs_final = r.model.get_xray_structure()
-    assert xrs_final.use_u_aniso().all_eq(True)
+    # (riding hydrogens are isotropic, with U_eq of the parent atoms)
+    hd = r.model.get_hd_selection()
+    assert hd.count(True) > 40
+    assert xrs_final.use_u_aniso().select(~hd).all_eq(True)
+    assert xrs_final.use_u_aniso().select(hd).count(True) == 0
+    u_eq = xrs_final.extract_u_iso_or_u_equiv()
+    for rc in r.model.riding_h_manager.parameterization_cpp:
+      assert approx_equal(u_eq[rc.ih], u_eq[rc.a0])
     # (riding hydrogens are added: non-H atoms only)
     u_final = xrs_final.scatterers().extract_u_star().select(
       ~r.model.get_hd_selection())
@@ -192,13 +199,17 @@ def exercise_anisotropic(data_file):
     "number_of_macro_cycles=1"], logger=log)
   assert "TLS refinement enabled (isotropic ADPs at d_min=2.00)" in \
     log.getvalue(), log.getvalue()
+  # (riding hydrogens are isotropic, not in TLS groups)
   xrs_final = r.model.get_xray_structure()
-  assert xrs_final.use_u_aniso().all_eq(True)
+  hd = r.model.get_hd_selection()
+  assert xrs_final.use_u_aniso().select(~hd).all_eq(True)
+  assert xrs_final.use_u_aniso().select(hd).count(True) == 0
   assert xrs_final.use_u_iso().all_eq(True)
   # auto with a high anisotropic_d_min: anisotropic
   r = run_quickref(model_file, data_file, "tst_quickref_aniso",
     ["number_of_macro_cycles=1", "anisotropic_d_min=2.5"])
-  assert r.model.get_xray_structure().use_u_aniso().all_eq(True)
+  hd = r.model.get_hd_selection()
+  assert r.model.get_xray_structure().use_u_aniso().select(~hd).all_eq(True)
 
 def exercise_reference_coordinate_restraints():
   import io, re

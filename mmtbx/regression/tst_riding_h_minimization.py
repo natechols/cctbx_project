@@ -2,8 +2,9 @@
 Tests for riding hydrogens in mmtbx.refinement.minimization.lbfgs
 (riding_h=True): the hydrogens are not parameters, their positions are
 idealized from the parent atoms and their ADPs are those of the parent
-atoms; gradients vs. finite differences for simultaneous refinement of
-coordinates and ADPs, with and without curvatures.
+atoms (isotropic: U_eq of anisotropic parents); gradients vs. finite
+differences for simultaneous refinement of coordinates and ADPs, with and
+without curvatures.
 """
 from __future__ import absolute_import, division, print_function
 import mmtbx.f_model
@@ -65,7 +66,8 @@ def get_minimizer(model, fmodel, use_curvatures, max_iterations):
 def exercise(anisotropic = False):
   true_model = get_model_with_h()
   if (anisotropic):
-    # anisotropic non-H atoms (hydrogens inherit the anisotropic ADPs)
+    # anisotropic non-H atoms (hydrogens are isotropic, with U_eq of the
+    # parent atoms)
     xrs = true_model.get_xray_structure()
     xrs.convert_to_anisotropic(selection = ~true_model.get_hd_selection())
     true_model.set_xray_structure(xrs)
@@ -119,9 +121,11 @@ def exercise(anisotropic = False):
     ideal = sites.deep_copy()
     model.riding_h_manager.idealize_riding_h_positions(sites_cart = ideal)
     assert flex.max((sites - ideal).norms()) < 1.e-6
+    # (hydrogens are isotropic, u_iso = U_eq of the parent)
     u = xrs.extract_u_iso_or_u_equiv()
     r = m._riding
     assert approx_equal(u.select(r.h_isel), u.select(r.p_isel))
+    assert xrs.use_u_aniso().select(r.h_isel).count(True) == 0
     if (use_curvatures):
       assert m.curvatures.size() == m.x.size()
       assert m.curvatures.all_gt(0)

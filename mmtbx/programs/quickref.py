@@ -349,8 +349,10 @@ Usage examples:
     self._setup_input_tls()
     self._setup_adp_type()
     xrs = model.get_xray_structure()
-    n_aniso = xrs.use_u_aniso().count(True)
-    n_iso = xrs.use_u_iso().count(True)
+    # (riding hydrogens are isotropic, with the ADPs of the parent atoms)
+    not_h = ~model.get_hd_selection()
+    n_aniso = (xrs.use_u_aniso() & not_h).count(True)
+    n_iso = (xrs.use_u_iso() & not_h).count(True)
     if (p.adp and n_iso == 0 and not (n_aniso > 0 and self.refine_anisotropic)):
       print("No refinable ADPs (all atoms are anisotropic and "
         "adp_type=fixed_anisotropic): ADPs are not refined.", file=log)
@@ -456,7 +458,9 @@ Usage examples:
     selections, strings, tlsos = [], [], []
     for t in tls_params:
       try:
-        sel = model.selection(t.selection_string)
+        # (riding hydrogens are isotropic)
+        sel = (model.selection(t.selection_string) &
+               ~model.get_hd_selection())
       except Exception as e:
         print("Input TLS group not interpreted (%s): %s: TLS is not used." % (
           t.selection_string, str(e)), file=log)
@@ -515,23 +519,23 @@ Usage examples:
       u_residual = u_residual)
 
   def _riding_h_adps_from_parents(self, model, xrs = None):
-    """Riding hydrogens have the ADPs (isotropic or anisotropic) of their
-    parent atoms from the start, so that the choice of refinable ADPs
-    (adp_type) is the same for hydrogens and parent atoms. Without xrs,
-    the ADPs of the model are changed."""
+    """Riding hydrogens are isotropic, with u_iso = U_eq of the parent atom
+    (as in the minimizer, riding_h=True), from the start: the hydrogens do
+    not affect the choice of refinable ADPs (adp_type). Without xrs, the
+    ADPs of the model are changed."""
     if (model.riding_h_manager is None): return
     set_model = (xrs is None)
     if (set_model):
       xrs = model.get_xray_structure()
+    uc = xrs.unit_cell()
     scatterers = xrs.scatterers()
+    u_eq = xrs.extract_u_iso_or_u_equiv()
     for rc in model.riding_h_manager.parameterization_cpp:
-      h, parent = scatterers[rc.ih], scatterers[rc.a0]
-      if (parent.flags.use_u_aniso()):
-        h.convert_to_anisotropic(unit_cell = xrs.unit_cell())
-        h.u_star = parent.u_star
-      else:
-        h.convert_to_isotropic(unit_cell = xrs.unit_cell())
-        h.u_iso = parent.u_iso
+      h = scatterers[rc.ih]
+      if (h.flags.use_u_aniso()):
+        h.convert_to_isotropic(unit_cell = uc)
+      h.flags.set_use_u_iso(True)
+      h.u_iso = u_eq[rc.a0]
     if (set_model):
       model.set_xray_structure(xrs)
 
@@ -605,10 +609,11 @@ Usage examples:
             "tls.enabled=True)", file=log)
 
   def _chain_selections(self, selection_strings, label, min_size=1,
-        allow_none=False):
+        allow_none=False, exclude_hydrogens=False):
     """
     Selections from selection strings, or one per chain (without water;
-    chains with fewer than min_size atoms are not used).
+    chains with fewer than min_size atoms are not used), optionally without
+    hydrogens.
     Returns the selections (flex.size_t) and selection strings.
     """
     model = self.model
@@ -621,10 +626,13 @@ Usage examples:
       selection_strings = ["chain '%s' and not water" % c for c in chain_ids]
     selections, strings = [], []
     used = flex.bool(model.get_number_of_atoms(), False)
+    if (exclude_hydrogens and model.get_hd_selection().count(True) > 0):
+      selection_strings = ["(%s) and not (element H or element D)" % s
+        for s in selection_strings]
     for s in selection_strings:
       sel = model.selection(s)
       if (sel.count(True) == 0):
-        if (s.endswith(" and not water")): continue # e.g. a water chain
+        if (" and not water" in s): continue # e.g. a water chain
         raise Sorry("%s: empty selection: %s" % (label, s))
       if (default and sel.count(True) < min_size): continue
       if ((used & sel).count(True) > 0):
@@ -689,7 +697,9 @@ Usage examples:
         self.tls_selections, strings = self._chain_selections(
           self.params.tls.group, "TLS groups",
           min_size = self.params.tls.min_group_size,
-          allow_none = self.tls_auto)
+          allow_none = self.tls_auto,
+          # (riding hydrogens are isotropic)
+          exclude_hydrogens = True)
         if (self.tls_selections is None):
           print("No TLS groups with at least %d atoms: TLS is not refined." %
             self.params.tls.min_group_size, file=log)
@@ -809,6 +819,10 @@ Usage examples:
     finally:
       fmodel.update(target_name = target_name)
     self._sync_model()
+    if (self.model.riding_h_manager is not None):
+      self._riding_h_adps_from_parents(self.model)
+      fmodel.update_xray_structure(xray_structure =
+        self.model.get_xray_structure(), update_f_calc = True)
 
   def _setup_reference_coordinate_restraints(self):
     """Restraints of the selected atoms to the starting coordinates."""
@@ -890,7 +904,8 @@ Usage examples:
     aniso = self._individual_aniso_selection()
     refine_aniso = (refine_adp and self.refine_anisotropic
                     and aniso.count(True) > 0)
-    refine_iso = (refine_adp and xrs.use_u_iso().count(True) > 0)
+    refine_iso = (refine_adp and
+      (xrs.use_u_iso() & ~model.get_hd_selection()).count(True) > 0)
     xray.set_scatterer_grad_flags(
       scatterers = xrs.scatterers(), site = refine_sites, u_iso = refine_adp,
       u_aniso = refine_aniso)

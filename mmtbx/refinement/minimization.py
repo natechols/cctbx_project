@@ -300,19 +300,26 @@ class lbfgs(object):
     fixed_h = (hd & ~is_dependent).iselection()
     for i_seq in fixed_h:
       scatterers[i_seq].flags.set_grads(False)
-    # the ADP model of each hydrogen is that of its parent
+    # hydrogen ADPs are isotropic: u_iso of the hydrogen = u_iso or U_eq
+    # (u_iso + U_eq of u_star, for TLS groups) of the parent
+    uc = self.xray_structure.unit_cell()
+    p_iso, p_aniso = flex.bool(), flex.bool()
     for i_h, i_p in zip(h_isel, p_isel):
       fh, fp = scatterers[i_h].flags, scatterers[i_p].flags
-      if(fp.use_u_aniso() and not fh.use_u_aniso()):
-        scatterers[i_h].u_star = scatterers[i_p].u_star
-      fh.set_use_u_iso(fp.use_u_iso())
-      fh.set_use_u_aniso(fp.use_u_aniso())
-      fh.set_grad_u_iso(fp.grad_u_iso())
-      fh.set_grad_u_aniso(fp.grad_u_aniso())
+      if(fh.use_u_aniso()):
+        scatterers[i_h].convert_to_isotropic(unit_cell = uc)
+      fh.set_use_u_iso(True)
+      fh.set_use_u_aniso(False)
+      fh.set_grad_u_iso(fp.grad_u_iso() or fp.grad_u_aniso())
+      fh.set_grad_u_aniso(False)
       fh.set_grad_site(fp.grad_site())
+      p_iso.append(fp.use_u_iso())
+      p_aniso.append(fp.use_u_aniso())
     self._riding = group_args(
       h_isel       = h_isel,
       p_isel       = p_isel,
+      p_iso        = p_iso,
+      p_aniso      = p_aniso,
       is_dependent = is_dependent,
       h_bool       = is_dependent,
       parameterization = rhm.parameterization_cpp)
@@ -348,8 +355,8 @@ class lbfgs(object):
     r.dependent_slots = dependent
 
   def _apply_riding(self):
-    """Hydrogen positions from the parent atoms, hydrogen ADPs = parent
-    ADPs."""
+    """Hydrogen positions from the parent atoms, hydrogen u_iso = U_eq of
+    the parent atoms."""
     r = self._riding
     xrs = self.xray_structure
     sites_cart = xrs.sites_cart()
@@ -357,11 +364,9 @@ class lbfgs(object):
     xrs.set_sites_cart(sites_cart)
     scatterers = xrs.scatterers()
     u_iso = scatterers.extract_u_iso()
-    u_iso.set_selected(r.h_isel, u_iso.select(r.p_isel))
+    u_iso.set_selected(r.h_isel,
+      xrs.extract_u_iso_or_u_equiv().select(r.p_isel))
     scatterers.set_u_iso(u_iso, r.h_bool, xrs.unit_cell())
-    u_star = scatterers.extract_u_star()
-    u_star.set_selected(r.h_isel, u_star.select(r.p_isel))
-    scatterers.set_u_star(u_star)
 
   def _fold_riding(self, full, curvatures = False):
     """
@@ -384,16 +389,23 @@ class lbfgs(object):
         sites_cart       = self.xray_structure.sites_cart(),
         parameterization = r.parameterization)
     result.set_selected(r.site_slots, s.as_double().select(r.site_codes))
-    # ADPs: the hydrogen ADPs are those of the parent atoms
-    for slots, codes, k in [(r.u_iso_slots, r.u_iso_codes, 1),
-                            (r.u_aniso_slots, r.u_aniso_codes, 6)]:
-      if(slots.size() == 0): continue
-      u = flex.double(k*n_sc, 0)
-      u.set_selected(codes, full.select(slots))
-      # (components of each hydrogen added to those of its parent)
-      for c in range(k):
-        u.add_selected(r.p_isel * k + c, u.select(r.h_isel * k + c))
-      result.set_selected(slots, u.select(codes))
+    # ADPs: u_iso of the hydrogen = u_iso + U_eq of the parent (the u_aniso
+    # parameters are u_cart: U_eq = trace/3)
+    if(r.u_iso_slots.size() == 0): return result
+    u_iso = flex.double(n_sc, 0)
+    u_iso.set_selected(r.u_iso_codes, full.select(r.u_iso_slots))
+    g_h = u_iso.select(r.h_isel)
+    u_iso.add_selected(r.p_isel.select(r.p_iso), g_h.select(r.p_iso))
+    result.set_selected(r.u_iso_slots, u_iso.select(r.u_iso_codes))
+    if(r.u_aniso_slots.size() > 0):
+      u_cart = flex.double(6*n_sc, 0)
+      u_cart.set_selected(r.u_aniso_codes, full.select(r.u_aniso_slots))
+      p_aniso = r.p_isel.select(r.p_aniso)
+      g_h = g_h.select(r.p_aniso)
+      d = [1/3, 1/9][int(curvatures)]
+      for k in range(3):
+        u_cart.add_selected(p_aniso * 6 + k, g_h * d)
+      result.set_selected(r.u_aniso_slots, u_cart.select(r.u_aniso_codes))
     return result
 
   def _group_occupancies(self):
