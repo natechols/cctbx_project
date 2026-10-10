@@ -115,6 +115,14 @@ namespace {
                    arg("zeroize_trace")))
    ;
 
+   def("tls_group_curvatures", tls_group_curvatures,
+                  (arg("sites_cart"),
+                   arg("origin"),
+                   arg("kappa"),
+                   arg("weights"),
+                   arg("rotations_cart"),
+                   arg("coherent_factor")));
+
    def("u_cart_from_xyz",
          (sym_mat3<double>(*)
              (af::shared<vec3<double> > const&)) u_cart_from_xyz,

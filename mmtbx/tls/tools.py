@@ -642,22 +642,13 @@ class tls_xray_target_minimizer(object):
       correct_adp    = self.correct_adp)
     self.fmodel_copy.update_xray_structure(update_f_calc=True)
     gc = group_curvatures(fmodel = self.fmodel_copy)
-    sites_cart = self.fmodel_copy.xray_structure.sites_cart()
     c_T, c_L, c_S = [], [], []
     for sel, tlso_ in zip(self.selections, tlsos):
       sel = flex.size_t(sel) if not isinstance(sel, flex.size_t) else sel
-      sites = sites_cart.select(sel)
-      def curvature(t, l, s):
-        d_u = uaniso_from_tls_one_group(
-          tlso = tlso(t = t, l = l, s = s, origin = tlso_.origin),
-          sites_cart = sites, zeroize_trace = True)
-        return gc.group_u_cart(sel, d_u)
-      def unit(n, i):
-        v = [0]*n; v[i] = 1
-        return v
-      c_T.append([curvature(unit(6, i), [0]*6, [0]*9) for i in range(6)])
-      c_L.append([curvature([0]*6, unit(6, i), [0]*9) for i in range(6)])
-      c_S.append([curvature([0]*6, [0]*6, unit(9, i)) for i in range(9)])
+      c = list(gc.tls_group(sel, tlso_.origin))
+      c_T.append(c[:6])
+      c_L.append(c[6:12])
+      c_S.append(c[12:])
     return self.pack(c_T, c_L, c_S)
 
   def compute_functional_gradients_diag(self):

@@ -338,6 +338,21 @@ def exercise_tls_curvatures(space_group_symbol):
   m = tls_minimizer_stub(fmodel, selections, tlsos)
   c = m.get_curvatures()
   assert c.size() == 42
+  # C++ (group_curvatures.tls_group) vs. group_u_cart() with the U_cart
+  # changes of the unit TLS parameters
+  from mmtbx.refinement.group_curvatures import group_curvatures
+  gc = group_curvatures(fmodel=m.fmodel_copy)
+  sites_cart = m.fmodel_copy.xray_structure.sites_cart()
+  for sel, t in zip(selections, tlsos):
+    c_cpp = gc.tls_group(sel, t.origin)
+    for p in range(21):
+      v = [0]*21; v[p] = 1
+      d_u = tools.uaniso_from_tls_one_group(
+        tlso=tools.tlso(t=v[:6], l=v[6:12], s=v[12:], origin=t.origin),
+        sites_cart=sites_cart.select(sel), zeroize_trace=True)
+      c_py = gc.group_u_cart(sel, d_u)
+      assert abs(c_cpp[p] - c_py) <= 1.e-10 * max(1, abs(c_py)), (
+        p, c_cpp[p], c_py)
   exact = exact_gauss_newton(fmodel)
   x0 = m.pack(m.T_min, m.L_min, m.S_min)
   sites = xs.sites_cart()

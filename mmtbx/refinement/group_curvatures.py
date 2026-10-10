@@ -85,12 +85,17 @@ class group_curvatures(object):
       self.rotations_cart.append(r)
       p += r
     self.polar_projector = p / len(ops)
+    self.rotations_cart_flex = flex.mat3_double(
+      [r.elems for r in self.rotations_cart])
     # scattering power of the atoms (f(0) occupancy)^2
     reg = xrs.scattering_type_registry()
-    self.scattering_power = flex.double([
-      (reg.gaussian_not_optional(sc.scattering_type).at_d_star_sq(0)
-       * sc.occupancy)**2 for sc in xrs.scatterers()])
+    f0 = flex.double([g.at_d_star_sq(0)
+      for g in reg.unique_gaussians_as_list()])
+    self.scattering_power = flex.pow2(
+      f0.select(reg.unique_indices(xrs.scatterers()))
+      * xrs.scatterers().extract_occupancies())
     self.total_scattering_power = flex.sum(self.scattering_power)
+    self._u_iso = None
 
   def group_fraction(self, iselection):
     if (self.total_scattering_power <= 0): return 0
@@ -104,12 +109,17 @@ class group_curvatures(object):
     curvatures: for isotropically distributed reflections
     c(U_kk) = c(u_iso)/5.
     """
-    result = self.atoms.u_iso.deep_copy()
-    aniso = self.xray_structure.use_u_aniso()
-    if (aniso.count(True) > 0):
-      result.set_selected(aniso, flex.double([(5/3) * (u[0] + u[1] + u[2])
-        for u in self.atoms.u_cart.select(aniso)]))
-    return result
+    if (self._u_iso is None):
+      result = self.atoms.u_iso.deep_copy()
+      aniso = self.xray_structure.use_u_aniso()
+      n_aniso = aniso.count(True)
+      if (n_aniso > 0):
+        u = self.atoms.u_cart.select(aniso).as_double()
+        i = flex.size_t_range(0, 6*n_aniso, 6)
+        result.set_selected(aniso,
+          (5/3) * (u.select(i) + u.select(i+1) + u.select(i+2)))
+      self._u_iso = result
+    return self._u_iso.deep_copy()
 
   def group_u_iso(self, selections):
     c = self.u_iso()
@@ -148,6 +158,23 @@ class group_curvatures(object):
     rho = q(d_mean) / q_mean if q_mean > 0 else 0
     return incoherent * (1 + self.group_fraction(iselection)
       * self.acentric_share_b * rho)
+
+  def tls_group(self, iselection, origin):
+    """
+    Curvatures for the 21 TLS parameters (T, L, S) of a group, as
+    group_u_cart() for the U_cart changes dU/dp of each parameter (with
+    trace(S) = 0, as mmtbx.tls.tools.uaniso_from_tls_one_group with
+    zeroize_trace=True); computed in C++ (mmtbx_tls_ext).
+    """
+    from mmtbx_tls_ext import tls_group_curvatures
+    return tls_group_curvatures(
+      sites_cart      = self.xray_structure.sites_cart().select(iselection),
+      origin          = origin,
+      kappa           = self.u_iso().select(iselection),
+      weights         = self.scattering_power.select(iselection),
+      rotations_cart  = self.rotations_cart_flex,
+      coherent_factor = self.group_fraction(iselection)
+                        * self.acentric_share_b)
 
   def group_occupancy(self, selections):
     c = self.atoms.occupancy

@@ -1224,6 +1224,87 @@ double ls_target_from_iso_tls(double const& t,
     return tg;
 }
 
+/*
+  Approximate curvatures of the X-ray target with respect to the 21 TLS
+  parameters of one group (T: 6, L: 6, S: 9, in this order), as
+  mmtbx.refinement.group_curvatures.group_curvatures.group_u_cart() for the
+  ADP changes D_i = dU_i/dp of each parameter p (U_i from
+  uaniso_from_tls with zeroize_trace=true):
+
+    incoherent = sum_i kappa_i q(D_i) / 15,  q(D) = (tr D)^2 + 2 D:D
+    curvature  = incoherent (1 + coherent_factor rho)
+    rho = q(<D>) / (sum_i w_i q(D_i) / sum_i w_i)
+
+  with <D> the w-weighted mean of D_i averaged over the point group
+  (rotations_cart: (1/n) sum_s R_s <D> R_s^T); kappa_i: curvatures of the
+  atoms for an isotropic shift of U, w_i: scattering powers,
+  coherent_factor: group scattering fraction * acentric share.
+ */
+inline af::shared<double>
+tls_group_curvatures(
+  af::const_ref<vec3<double> > const& sites_cart,
+  vec3<double> const& origin,
+  af::const_ref<double> const& kappa,
+  af::const_ref<double> const& weights,
+  af::const_ref<mat3<double> > const& rotations_cart,
+  double coherent_factor)
+{
+  SCITBX_ASSERT(kappa.size() == sites_cart.size());
+  SCITBX_ASSERT(weights.size() == sites_cart.size());
+  SCITBX_ASSERT(rotations_cart.size() > 0);
+  struct q_function {
+    static double q(sym_mat3<double> const& d) {
+      double tr = d[0] + d[1] + d[2];
+      double dd = d[0]*d[0] + d[1]*d[1] + d[2]*d[2]
+                + 2*(d[3]*d[3] + d[4]*d[4] + d[5]*d[5]);
+      return tr*tr + 2*dd;
+    }
+  };
+  double w_sum = 0;
+  for(std::size_t i=0;i<weights.size();i++) w_sum += weights[i];
+  af::shared<double> result;
+  result.reserve(21);
+  for(std::size_t p=0;p<21;p++) {
+    sym_mat3<double> t(0,0,0,0,0,0);
+    sym_mat3<double> l(0,0,0,0,0,0);
+    mat3<double> s(0,0,0,0,0,0,0,0,0);
+    if      (p < 6)  t[p] = 1;
+    else if (p < 12) l[p-6] = 1;
+    else             s[p-12] = 1;
+    double incoherent = 0;
+    double wq_sum = 0;
+    sym_mat3<double> d_mean(0,0,0,0,0,0);
+    for(std::size_t i=0;i<sites_cart.size();i++) {
+      sym_mat3<double> d = uaniso_from_tls(
+        t, l, s, origin, sites_cart[i], true).u();
+      double q_i = q_function::q(d);
+      incoherent += kappa[i] * q_i;
+      wq_sum += weights[i] * q_i;
+      for(std::size_t k=0;k<6;k++) d_mean[k] += weights[i] * d[k];
+    }
+    incoherent /= 15;
+    if (w_sum <= 0 || incoherent <= 0) {
+      result.push_back(incoherent);
+      continue;
+    }
+    d_mean = d_mean / w_sum;
+    // average over the point group
+    mat3<double> dm(d_mean);
+    mat3<double> d_sym(0,0,0,0,0,0,0,0,0);
+    for(std::size_t i_r=0;i_r<rotations_cart.size();i_r++) {
+      mat3<double> const& r = rotations_cart[i_r];
+      d_sym += r * dm * r.transpose();
+    }
+    d_sym = d_sym / static_cast<double>(rotations_cart.size());
+    sym_mat3<double> d_mean_sym(
+      d_sym[0], d_sym[4], d_sym[8], d_sym[1], d_sym[2], d_sym[5]);
+    double q_mean = wq_sum / w_sum;
+    double rho = (q_mean > 0 ? q_function::q(d_mean_sym) / q_mean : 0);
+    result.push_back(incoherent * (1 + coherent_factor * rho));
+  }
+  return result;
+}
+
 }} // namespace mmtbx::tls
 
 #endif // MMTBX_TLS_H
