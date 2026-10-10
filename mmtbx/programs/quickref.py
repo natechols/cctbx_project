@@ -2,7 +2,7 @@
 from __future__ import absolute_import, division, print_function
 from libtbx.program_template import ProgramTemplate
 from libtbx.utils import Sorry, null_out
-from libtbx import group_args
+from libtbx import group_args, Auto
 from cctbx import xray, adptbx
 from cctbx.array_family import flex
 import iotbx.pdb
@@ -104,6 +104,45 @@ weights
     .type = bool
     .help = Recompute the weights at the start of each macro-cycle \
             (otherwise once, from the input model)
+  optimize = False
+    .type = bool
+    .help = Choose wxu_scale and wxc_scale by trial refinements. The trials \
+            do not use the R-free set: a test subset of the work set \
+            (test_fraction or min_test_reflections, whichever is larger) is \
+            left out of the trial refinements, and the scales giving the \
+            lowest R-factor for this subset are used in the refinement \
+            against the full work set.
+  test_fraction = 0.05
+    .type = float(value_min=0, value_max=0.5)
+  min_test_reflections = 2000
+    .type = int(value_min=0)
+  wxu_scale_grid = 0.25 0.5 1 2 4 8
+    .type = floats(value_min=0)
+    .help = wxu_scale values of the trials (with the default wxc_scale), \
+            extended by factors of 2 (at most twice) if the best value is \
+            at the end of the grid
+  wxc_scale_grid = 0.125 0.25 0.5 1 2
+    .type = floats(value_min=0)
+    .help = wxc_scale values of the trials (with the best wxu_scale), \
+            extended as wxu_scale_grid
+  trial_macro_cycles = 1
+    .type = int(value_min=1)
+  max_bond_rmsd = Auto
+    .type = float(value_min=0)
+    .help = Trials with a larger rmsd(bonds) are not used (if all are \
+            larger, the trial with the smallest rmsd(bonds) is used). \
+            Auto: 0.015 A, or 0.02 A at atomic resolution (d_min <= 1.0 A).
+  trial_shake_sites = 0
+    .type = float(value_min=0)
+    .help = RMS shift (A) of the coordinates of the starting model of the \
+            trials (with distorted geometry, the trials favour tight \
+            geometry restraints)
+  trial_shake_adp = 10
+    .type = float(value_min=0)
+    .help = Spread of the B-factors of the starting model of the trials \
+            (anisotropic ADPs are not changed). The input model was refined \
+            against the test subset, and without the perturbation the \
+            trials favour the weights that change the model least.
 }
 rigid_body
   .short_caption = Rigid-body refinement
@@ -386,6 +425,9 @@ Usage examples:
         print("Occupancy groups: %d (%d constrained to sum to 1)" % (
           len(self.occupancy_groups), n_constrained), file=log)
     w = None
+    if (self.params.weights.optimize and
+        (self.individual_sites or self.individual_adp)):
+      self._optimize_weights()
     for cycle in range(p.number_of_macro_cycles):
       if (cycle > 0):
         # outliers are rejected only once, at the start
@@ -396,34 +438,7 @@ Usage examples:
       if ((self.individual_sites or self.individual_adp) and
           (w is None or self.params.weights.recompute_each_macro_cycle)):
         w = self._weights()
-      if (self.rigid_body_selections is not None):
-        self._refine_rigid_body()
-      if (self.tls_selections is not None):
-        self._refine_tls(first = (cycle == 0))
-      sites, adp = self.individual_sites, self.individual_adp
-      if (not sites and not adp):
-        steps = []
-      elif (sites and adp and p.simultaneous):
-        steps = [(True, True)]
-      else:
-        steps = []
-        if (sites): steps.append((True, False))
-        if (adp):   steps.append((False, True))
-      n_iter = 0
-      occupancies_done = False
-      for refine_sites, refine_adp in steps:
-        groups = None
-        if (self.occupancy_groups is not None and p.occupancies_simultaneous
-            and refine_adp):
-          groups = self.occupancy_groups
-          occupancies_done = True
-        n_iter += self._minimize(refine_sites, refine_adp, w,
-          occupancy_groups = groups)
-      if (self.group_adp_selections is not None):
-        self._refine_group_adp()
-      if (self.occupancy_groups is not None and not occupancies_done):
-        self._refine_occupancies()
-      model.set_xray_structure(fmodel.xray_structure)
+      n_iter = self._macro_cycle(first = (cycle == 0), w = w)
       print("macro-cycle %d: r_work=%.4f r_free=%.4f %s iterations=%d" % (
         cycle+1, fmodel.r_work(), fmodel.r_free(), self._geometry_summary(),
         n_iter), file=log)
@@ -431,6 +446,162 @@ Usage examples:
     self.r_free = fmodel.r_free()
     self._write_output()
     print("\nTime: %.1fs" % (time.time() - t0), file=log)
+
+  def _macro_cycle(self, first, w):
+    """One macro-cycle of refinement (self.fmodel, self.model); returns the
+    number of LBFGS iterations of the individual refinement."""
+    p = self.params.refinement
+    if (self.rigid_body_selections is not None):
+      self._refine_rigid_body()
+    if (self.tls_selections is not None):
+      self._refine_tls(first = first)
+    sites, adp = self.individual_sites, self.individual_adp
+    if (not sites and not adp):
+      steps = []
+    elif (sites and adp and p.simultaneous):
+      steps = [(True, True)]
+    else:
+      steps = []
+      if (sites): steps.append((True, False))
+      if (adp):   steps.append((False, True))
+    n_iter = 0
+    occupancies_done = False
+    for refine_sites, refine_adp in steps:
+      groups = None
+      if (self.occupancy_groups is not None and p.occupancies_simultaneous
+          and refine_adp):
+        groups = self.occupancy_groups
+        occupancies_done = True
+      n_iter += self._minimize(refine_sites, refine_adp, w,
+        occupancy_groups = groups)
+    if (self.group_adp_selections is not None):
+      self._refine_group_adp()
+    if (self.occupancy_groups is not None and not occupancies_done):
+      self._refine_occupancies()
+    self.model.set_xray_structure(self.fmodel.xray_structure)
+    return n_iter
+
+  def _optimize_weights(self):
+    """
+    wxu_scale and wxc_scale from trial refinements against a subset of the
+    work set; the R-free set is not used. The test subset is excluded from
+    the trial refinements, and the scales with the lowest R-factor for the
+    subset are kept (parameters weights.wxu_scale and weights.wxc_scale).
+    """
+    from mmtbx.tls import tools
+    pw = self.params.weights
+    log = self.logger
+    fmodel = self.fmodel
+    work = ~fmodel.r_free_flags().data()
+    n_work = work.count(True)
+    n_test = max(pw.min_test_reflections, int(pw.test_fraction * n_work))
+    if (n_test > n_work // 2):
+      print("Weight optimization: too few work reflections (%d): the weights "
+        "are not optimized." % n_work, file=log)
+      return
+    # test subset: random reflections of the work set
+    fmodel_work = fmodel.select(work)
+    perm = flex.random_permutation(n_work)
+    test = flex.bool(n_work, False)
+    test.set_selected(perm[:n_test], True)
+    fmodel_work.update(r_free_flags =
+      fmodel_work.r_free_flags().customized_copy(data = test))
+    fmodel_work.update_all_scales(remove_outliers = False)
+    max_bond_rmsd = pw.max_bond_rmsd
+    if (max_bond_rmsd is None or max_bond_rmsd is Auto):
+      max_bond_rmsd = [0.015, 0.02][int(fmodel.f_obs().d_min() <= 1.0)]
+    print("Weight optimization: trial refinements against %d of %d work "
+      "reflections (test subset: %d), max. rmsd(bonds) %g" % (
+      n_work - n_test, n_work, n_test, max_bond_rmsd), file=log)
+    model = self.model
+    xrs_start = model.get_xray_structure().deep_copy_scatterers()
+    # starting model of the trials, optionally perturbed: the test subset
+    # was part of the work set the input model was refined against
+    xrs_trial = xrs_start.deep_copy_scatterers()
+    if (pw.trial_shake_sites > 0 or pw.trial_shake_adp > 0):
+      if (pw.trial_shake_sites > 0):
+        xrs_trial.shake_sites_in_place(rms_difference = pw.trial_shake_sites)
+      if (pw.trial_shake_adp > 0):
+        xrs_trial.shake_adp(spread = pw.trial_shake_adp,
+          keep_anisotropic = True)
+      if (model.riding_h_manager is not None):
+        sites = xrs_trial.sites_cart()
+        model.riding_h_manager.idealize_riding_h_positions(sites_cart = sites)
+        xrs_trial.set_sites_cart(sites)
+        self._riding_h_adps_from_parents(model, xrs_trial)
+    def copy_tlsos(tlsos):
+      return [tools.tlso(t = o.t, l = o.l, s = o.s, origin = o.origin)
+        for o in tlsos]
+    tlsos_start = None
+    if (model.tls_groups is not None):
+      tlsos_start = copy_tlsos(model.tls_groups.tlsos)
+    w_base = self._weights()
+    results = {}
+    def trial(wxc_scale, wxu_scale):
+      key = (wxc_scale, wxu_scale)
+      if (key in results): return results[key]
+      w = group_args(
+        xyz_weights_result = weights_module.weights(
+          wx = w_base.xyz_weights_result.wx, wx_scale = wxc_scale, w = 1),
+        adp_weights_result = weights_module.weights(
+          wx = w_base.adp_weights_result.wx, wx_scale = wxu_scale, w = 1))
+      xrs = xrs_trial.deep_copy_scatterers()
+      model.set_xray_structure(xrs)
+      if (tlsos_start is not None):
+        model.tls_groups.tlsos = copy_tlsos(tlsos_start)
+      self.fmodel = fmodel_work.deep_copy()
+      self.fmodel.update_xray_structure(xray_structure = xrs,
+        update_f_calc = True, update_f_mask = True)
+      try:
+        for cycle in range(pw.trial_macro_cycles):
+          if (cycle > 0):
+            self.fmodel.update_all_scales(remove_outliers = False)
+          self._macro_cycle(first = (cycle == 0), w = w)
+        es = self.model.restraints_manager_energies_sites()
+        r = group_args(r_work = self.fmodel.r_work(),
+          r_test = self.fmodel.r_free(),
+          bonds = es.geometry.bond_deviations()[2],
+          geometry = self._geometry_summary())
+      finally:
+        self.fmodel = fmodel
+      print("  wxc_scale=%-6g wxu_scale=%-6g r_work=%.4f r_test=%.4f %s%s" % (
+        wxc_scale, wxu_scale, r.r_work, r.r_test, r.geometry,
+        ["", " (rmsd(bonds) > %g)" % max_bond_rmsd][int(r.bonds >
+          max_bond_rmsd)]), file=log)
+      results[key] = r
+      return r
+    def scan(grid, result):
+      # lowest r_test among the trials with rmsd(bonds) <= max_bond_rmsd,
+      # otherwise the lowest rmsd(bonds). If the best value is at the end
+      # of the grid, the grid is extended by factors of 2, at most twice.
+      def key(v):
+        r = result(v)
+        if (r.bonds <= max_bond_rmsd): return (0, r.r_test)
+        return (1, r.bonds)
+      grid = sorted(set(grid))
+      for extension in range(3):
+        best = min(grid, key = key)
+        if (extension == 2 or len(grid) < 2): break
+        if   (best == grid[-1]): grid.append(best * 2)
+        elif (best == grid[0]):  grid.insert(0, best / 2)
+        else: break
+      return best
+    try:
+      wxc, wxu = pw.wxc_scale, pw.wxu_scale
+      if (self.individual_adp):
+        wxu = scan(pw.wxu_scale_grid + [wxu], lambda v: trial(wxc, v))
+      if (self.individual_sites):
+        wxc = scan(pw.wxc_scale_grid + [wxc], lambda v: trial(v, wxu))
+    finally:
+      # the starting model
+      model.set_xray_structure(xrs_start)
+      if (tlsos_start is not None):
+        model.tls_groups.tlsos = tlsos_start
+      fmodel.update_xray_structure(xray_structure = xrs_start,
+        update_f_calc = True, update_f_mask = True)
+    pw.wxc_scale, pw.wxu_scale = wxc, wxu
+    print("Weight optimization: wxc_scale=%g wxu_scale=%g" % (wxc, wxu),
+      file=log)
 
   # ---------------------------------------------------------------------------
 
@@ -1105,5 +1276,6 @@ Usage examples:
       r_work          = self.r_work,
       r_free          = self.r_free,
       model           = self.model,
+      fmodel          = self.fmodel,
       model_file_name = self.model_file_name,
       mtz_file_name   = self.mtz_file_name)

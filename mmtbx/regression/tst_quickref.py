@@ -491,6 +491,70 @@ def exercise_ncs():
       assert r.r_work < 0.7 * r.r_work_start, (ncs_type, r.r_work_start,
         r.r_work)
 
+def exercise_weight_optimization(model_file, data_file):
+  """weights.optimize: trial refinements against a subset of the work set"""
+  import io, re
+  def run(args):
+    log = io.StringIO()
+    r = run_program(program_class=quickref.Program, args=[model_file,
+      data_file, "output.prefix=tst_quickref_w", "output.overwrite=True",
+      "number_of_macro_cycles=2", "write_map_coefficients=False",
+      "tls.enabled=False"] + args, logger=log)
+    return r, log.getvalue()
+  r0, text = run([])
+  assert "Weight optimization" not in text
+  # wxu_scale trials 0.5, 1, 2 (wxc_scale=0.5), then wxc_scale trials 0.25
+  # and 1 (0.5 is done); grids are extended if the best value is at an end
+  r, text = run(["weights.optimize=True", "weights.wxu_scale_grid=0.5 2",
+    "weights.wxc_scale_grid=0.25 1", "weights.min_test_reflections=100",
+    "weights.max_bond_rmsd=1"])
+  trials = re.findall(r"  wxc_scale=(\S+) +wxu_scale=(\S+) +r_work=(\S+) "
+    r"r_test=(\S+)", text)
+  assert 5 <= len(trials) <= 9, text
+  assert [t[1] for t in trials[:3]] == ["0.5", "1", "2"], trials
+  n_wxu = [i for i, t in enumerate(trials) if t[0] != "0.5"][0]
+  # the R-free set is not used: trials against the work set only
+  m = re.search(r"trial refinements against (\d+) of (\d+) work reflections "
+    r"\(test subset: (\d+)\)", text)
+  n_train, n_work, n_test = [int(v) for v in m.groups()]
+  assert n_train + n_test == n_work
+  assert n_test == max(100, int(0.05 * n_work)), (n_test, n_work)
+  assert r.fmodel.r_free_flags().data().count(False) == n_work
+  # the selected scales are those with the lowest r_test
+  best_wxu = min(trials[:n_wxu], key = lambda t: float(t[3]))[1]
+  best_wxc = min([t for t in trials if t[1] == best_wxu],
+    key = lambda t: float(t[3]))[0]
+  assert "Weight optimization: wxc_scale=%s wxu_scale=%s" % (
+    best_wxc, best_wxu) in text, text
+  assert r.r_free_start == r0.r_free_start
+  assert r.r_free < r.r_free_start
+  # all trials over max_bond_rmsd: the trials with the smallest rmsd(bonds)
+  r, text = run(["weights.optimize=True", "weights.wxu_scale_grid=0.5 2",
+    "weights.wxc_scale_grid=0.25 1", "weights.min_test_reflections=100",
+    "weights.max_bond_rmsd=0.00001"])
+  trials = re.findall(r"  wxc_scale=(\S+) +wxu_scale=(\S+) +r_work=\S+ "
+    r"r_test=\S+ rmsd\(bonds\)=(\S+) .*\(rmsd\(bonds\) > 1e-05\)", text)
+  assert len(trials) == len(re.findall("  wxc_scale=", text)), text
+  n_wxu = [i for i, t in enumerate(trials) if t[0] != "0.5"][0]
+  best_wxu = min(trials[:n_wxu], key = lambda t: float(t[2]))[1]
+  best_wxc = min([t for t in trials if t[1] == best_wxu],
+    key = lambda t: float(t[2]))[0]
+  assert "Weight optimization: wxc_scale=%s wxu_scale=%s" % (
+    best_wxc, best_wxu) in text, text
+  # the trials do not change the starting model: with only the default
+  # scales, the result is that of the refinement without trials
+  r1, text = run(["weights.optimize=True", "weights.wxu_scale_grid=1",
+    "weights.wxc_scale_grid=0.5", "weights.min_test_reflections=100"])
+  assert len(re.findall("  wxc_scale=", text)) == 1, text
+  assert abs(r1.r_free - r0.r_free) < 1.e-3, (r1.r_free, r0.r_free)
+  # with TLS refinement (the TLS parameters are reset after each trial)
+  r, text = run(["weights.optimize=True", "weights.wxu_scale_grid=1 2",
+    "weights.wxc_scale_grid=0.5", "weights.min_test_reflections=100",
+    "tls.enabled=True", "tls.min_group_size=10"])
+  assert "TLS refinement: 1 groups" in text, text
+  assert "Weight optimization: wxc_scale=" in text, text
+  assert r.r_free < r.r_free_start
+
 def run():
   random.seed(0)
   flex.set_random_seed(0)
@@ -499,6 +563,7 @@ def run():
   exercise_reproducibility(model_file, data_file)
   exercise(model_file, data_file)
   exercise_hydrogens(model_file, data_file)
+  exercise_weight_optimization(model_file, data_file)
   exercise_occupancies()
   exercise_ncs()
   exercise_reference_coordinate_restraints()
