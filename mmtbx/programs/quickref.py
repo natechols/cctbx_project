@@ -971,6 +971,21 @@ Usage examples:
         sc.flags.set_use_u_aniso(True)
       tools.split_u(xrs, self.tls_selections, offset = True)
       fmodel.update_xray_structure(update_f_calc = True)
+    # The TLS parameters are fitted to the ADPs only at the start; then the
+    # refinement starts from the current TLS parameters (or from those of
+    # the input model). Without start_tls_value, tls_refinement fits them
+    # to the ADPs again (tls_from_u_cart), which takes about as long as the
+    # TLS refinement itself and does not lower R-free.
+    if (first and not self.tls_presplit):
+      # (tls_refinement would fit with 100 macro-cycles of 100 iterations
+      # for each of three parameter subsets; 10 macro-cycles converge)
+      self.model.tls_groups.tlsos = tools.tls_from_u_cart(
+        xray_structure         = xrs,
+        tlsos_initial          = self.model.tls_groups.tlsos,
+        tls_selections         = self.tls_selections,
+        number_of_macro_cycles = 10,
+        max_iterations         = 100)
+    start_tls_value = self.model.tls_groups.tlsos
     target_name = fmodel.target_name
     fmodel.update(target_name = "ls_wunit_k1")
     try:
@@ -984,6 +999,7 @@ Usage examples:
         refine_S                 = True,
         number_of_macro_cycles   = 1,
         max_number_of_iterations = self.params.tls.max_iterations,
+        start_tls_value          = start_tls_value,
         out                      = null_out(),
         verbose                  = False,
         use_curvatures           = p.use_curvatures,
