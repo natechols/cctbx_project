@@ -204,6 +204,59 @@ def exercise_find_tls_groups(model_file, data_file):
   assert re.search(r"TLS refinement: %d groups" % n, text), text
   assert r.r_free < r.r_free_start
 
+def exercise_anomalous():
+  """anomalous data (F+, F-): used as separate observations, anomalous
+  difference map; optional f' and f'' from the wavelength"""
+  import io, re
+  import iotbx.mtz
+  from mmtbx.regression.tst_minimization_curvatures import get_model
+  model = get_model()
+  xrs = model.get_xray_structure().deep_copy_scatterers()
+  wavelength = 1.75
+  xrs.set_inelastic_form_factors(photon=wavelength, table="sasaki")
+  f_obs = abs(xrs.structure_factors(d_min=1.6, algorithm="direct",
+    anomalous_flag=True).f_calc())
+  flags = f_obs.average_bijvoet_mates().generate_r_free_flags(fraction=0.1)
+  mtz = f_obs.as_mtz_dataset(column_root_label="F", wavelength=wavelength)
+  mtz.add_miller_array(flags, column_root_label="R-free-flags")
+  data_file = "tst_quickref_anom_data.mtz"
+  mtz.mtz_object().write(data_file)
+  model_file = "tst_quickref_anom_start.pdb"
+  with open(model_file, "w") as f:
+    f.write(model.model_as_pdb())
+  s_sites = [sc.site for sc in xrs.scatterers() if sc.scattering_type == "S"]
+  assert len(s_sites) > 0
+  def run(args):
+    log = io.StringIO()
+    r = run_program(program_class=quickref.Program, args=[model_file,
+      data_file, "output.prefix=tst_quickref_anom", "output.overwrite=True",
+      "number_of_macro_cycles=3", "convergence_r_work=0"] + args, logger=log)
+    labels = iotbx.mtz.object(r.mtz_file_name).column_labels()
+    return r, log.getvalue(), labels
+  # default: Friedel mates as separate observations, anomalous map
+  r0, text, labels = run([])
+  assert "Anomalous data:" in text, text
+  assert "f' and f''" not in text
+  assert r0.fmodel.f_obs().anomalous_flag()
+  for label in ["2FOFCWT", "FOFCWT", "ANOM", "PHANOM"]:
+    assert label in labels, labels
+  assert not [l for l in labels if "(+)" in l or "(-)" in l], labels
+  anom = [a for a in iotbx.mtz.object(r0.mtz_file_name).as_miller_arrays()
+    if a.info().labels[0] == "ANOM"][0]
+  fft_map = anom.fft_map(resolution_factor=0.25)
+  fft_map.apply_sigma_scaling()
+  for site in s_sites:
+    assert fft_map.real_map_unpadded().eight_point_interpolation(site) > 10
+  # f' and f'' at the wavelength of the reflection file
+  r1, text, labels = run(["anomalous.set_inelastic_form_factors=True"])
+  assert re.search(r"S +f'= *0\.35\d f''= *0\.70\d", text), text
+  assert r1.r_free < r0.r_free, (r1.r_free, r0.r_free)
+  # merged
+  r2, text, labels = run(["anomalous.use_anomalous_data=False"])
+  assert "Anomalous data:" not in text
+  assert not r2.fmodel.f_obs().anomalous_flag()
+  assert "ANOM" not in labels
+
 def exercise_anisotropic(data_file):
   pdb_inp = iotbx.pdb.input(file_name="tst_quickref_start.pdb")
   xrs = pdb_inp.xray_structure_simple()
@@ -616,6 +669,7 @@ def run():
   exercise_reproducibility(model_file, data_file)
   exercise_convergence(model_file, data_file)
   exercise_find_tls_groups(model_file, data_file)
+  exercise_anomalous()
   exercise(model_file, data_file)
   exercise_hydrogens(model_file, data_file)
   exercise_weight_optimization(model_file, data_file)

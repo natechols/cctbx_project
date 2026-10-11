@@ -306,6 +306,28 @@ add_hydrogens = True
   .type = bool
   .help = Add riding hydrogens with mmtbx.hydrogens.reduce_hydrogen \
           (existing hydrogens are kept unless remove_hydrogens=True)
+anomalous
+  .short_caption = Anomalous data
+{
+  use_anomalous_data = True
+    .type = bool
+    .help = If the data are anomalous (F+ and F-, or I+ and I-), use the \
+            Friedel mates as separate observations (otherwise they are \
+            merged). An anomalous difference map is then written \
+            (output.write_map_coefficients).
+  set_inelastic_form_factors = False
+    .type = bool
+    .help = With anomalous data: set f' and f'' of all atoms from \
+            form_factor_table at the wavelength (anomalous.wavelength, or \
+            from the reflection file), so that the anomalous differences \
+            are modeled.
+  wavelength = None
+    .type = float(value_min=0)
+    .help = X-ray wavelength (A) for set_inelastic_form_factors (default: \
+            from the reflection file)
+  form_factor_table = *sasaki henke
+    .type = choice
+}
 output
 {
   write_map_coefficients = True
@@ -386,6 +408,10 @@ Usage examples:
       model = model.select(~model.get_hd_selection())
       self.data_manager.add_model(model_name, model)
       print("Hydrogen atoms removed.", file=log)
+    if (not self.params.anomalous.use_anomalous_data):
+      fmodel_params = self.data_manager.get_fmodel_params()
+      fmodel_params.xray_data.force_anomalous_flag_to_be_equal_to = False
+      self.data_manager.set_fmodel_params(fmodel_params)
     # get_fmodel() may reset the model (crystal symmetry), so the model
     # is processed afterwards
     fmodel = self.data_manager.get_fmodel(
@@ -403,6 +429,7 @@ Usage examples:
         " (%d hydrogens without riding parameterization are fixed)" % (
         n_h - n_riding)), file=log)
       self._riding_h_adps_from_parents(model)
+    self._setup_anomalous(model, fmodel)
     model.set_log(log)
     self.model = model
     fmodel.update_xray_structure(
@@ -735,6 +762,38 @@ Usage examples:
       tlsos      = tlsos,
       u_tls      = u_tls,
       u_residual = u_residual)
+
+  def _setup_anomalous(self, model, fmodel):
+    """Anomalous data: report, and optionally set f' and f'' of the atoms
+    (anomalous.set_inelastic_form_factors)."""
+    p = self.params.anomalous
+    log = self.logger
+    f_obs = fmodel.f_obs()
+    if (not f_obs.anomalous_flag()):
+      return
+    print("Anomalous data: %d Bijvoet pairs (F+ and F- are separate "
+      "observations)" % f_obs.n_bijvoet_pairs(), file=log)
+    if (not p.set_inelastic_form_factors):
+      return
+    wavelength = p.wavelength
+    if (wavelength is None and f_obs.info() is not None):
+      wavelength = getattr(f_obs.info(), "wavelength", None)
+    if (wavelength is None or wavelength <= 0):
+      print("  No wavelength (anomalous.wavelength): f' and f'' are not "
+        "set.", file=log)
+      return
+    xrs = model.get_xray_structure()
+    xrs.set_inelastic_form_factors(photon = wavelength,
+      table = p.form_factor_table)
+    model.set_xray_structure(xrs)
+    values = {}
+    for sc in xrs.scatterers():
+      values.setdefault(sc.scattering_type, (sc.fp, sc.fdp))
+    print("  f' and f'' at %.4f A (%s):" % (wavelength, p.form_factor_table),
+      file=log)
+    for t in sorted(values, key = lambda t: -values[t][1]):
+      print("    %-4s f'=%6.3f f''=%6.3f" % (t, values[t][0], values[t][1]),
+        file=log)
 
   def _riding_h_adps_from_parents(self, model, xrs = None):
     """Riding hydrogens are isotropic, with u_iso = U_eq of the parent atom
@@ -1429,9 +1488,16 @@ Usage examples:
       decorator = iotbx.mtz.label_decorator(phases_prefix="PH")
       emap = self.fmodel.electron_density_map()
       mtz = None
-      for map_type, label in [("2mFo-DFc", "2FOFCWT"), ("mFo-DFc", "FOFCWT")]:
+      maps = [("2mFo-DFc", "2FOFCWT"), ("mFo-DFc", "FOFCWT")]
+      if (self.fmodel.f_obs().anomalous_flag()):
+        # anomalous difference map (model phases)
+        maps.append(("anom", "ANOM"))
+      for map_type, label in maps:
         mc = emap.map_coefficients(map_type=map_type, isotropize=False,
           fill_missing=False)
+        if (mc.anomalous_flag()):
+          # (one map: the Friedel mates are averaged)
+          mc = mc.average_bijvoet_mates()
         if (mtz is None):
           mtz = mc.as_mtz_dataset(column_root_label=label,
             label_decorator=decorator)

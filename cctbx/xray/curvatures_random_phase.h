@@ -45,10 +45,10 @@ namespace cctbx { namespace xray { namespace structure_factors {
       Debye-Waller factor (for anisotropic scatterers DW depends on s).
       The site symmetry weight (m/n) of the scatterers is included.
 
-      For isotropic scatterers without f' and f'', the sums are
-      tabulated for each scattering type on a grid of u_iso values
-      (b_iso_grid_step) and interpolated linearly in log space. All
-      other scatterers are summed directly, using every
+      For isotropic scatterers, the sums are tabulated for each
+      combination of scattering type, f' and f'' on a grid of u_iso values
+      (b_iso_grid_step) and interpolated linearly in log space. The
+      anisotropic scatterers are summed directly, using every
       reflection_stride-th reflection (and scaling the sums accordingly)
       to reduce the cost for many anisotropic scatterers.
       Constraints for scatterers on special positions are not applied.
@@ -207,16 +207,27 @@ namespace cctbx { namespace xray { namespace structure_factors {
       {
         f_t u_min = 0, u_max = 0;
         bool first = true;
-        std::map<std::string, std::size_t> type_indices;
+        // (scattering type, f', f''): e.g. f' and f'' from tables at the
+        // wavelength are the same for all atoms of an element
+        typedef std::pair<std::string, std::pair<f_t, f_t> > type_key_t;
+        std::map<type_key_t, std::size_t> type_indices;
+        std::vector<std::size_t> i_types(scatterers.size(), 0);
         for(std::size_t i_sc=0;i_sc<scatterers.size();i_sc++) {
           scatterer<f_t> const& sc = scatterers[i_sc];
-          if (sc.flags.use_u_aniso() || sc.fp != 0 || sc.fdp != 0) continue;
+          if (sc.flags.use_u_aniso()) continue;
           if (first || sc.u_iso < u_min) u_min = sc.u_iso;
           if (first || sc.u_iso > u_max) u_max = sc.u_iso;
           first = false;
-          if (type_indices.find(sc.scattering_type) == type_indices.end()) {
+          type_key_t key(sc.scattering_type, std::make_pair(sc.fp, sc.fdp));
+          typename std::map<type_key_t, std::size_t>::const_iterator
+            it = type_indices.find(key);
+          if (it == type_indices.end()) {
             std::size_t i_type = type_indices.size();
-            type_indices[sc.scattering_type] = i_type;
+            type_indices[key] = i_type;
+            i_types[i_sc] = i_type;
+          }
+          else {
+            i_types[i_sc] = it->second;
           }
           tabulated[i_sc] = true;
         }
@@ -226,10 +237,16 @@ namespace cctbx { namespace xray { namespace structure_factors {
           std::ceil((u_max - u_min) / du)) + 2;
         std::size_t n_types = type_indices.size();
         std::vector<af::shared<f_t> > f_sq(n_types);
-        for(std::map<std::string, std::size_t>::const_iterator
+        for(typename std::map<type_key_t, std::size_t>::const_iterator
               t=type_indices.begin();t!=type_indices.end();t++) {
-          af::shared<f_t> f = form_factors(scattering_type_registry, t->first);
-          for(std::size_t ih=0;ih<f.size();ih++) f[ih] *= f[ih] * c_h_[ih];
+          af::shared<f_t> f = form_factors(
+            scattering_type_registry, t->first.first);
+          f_t fp = t->first.second.first;
+          f_t fdp = t->first.second.second;
+          for(std::size_t ih=0;ih<f.size();ih++) {
+            f[ih] = (scitbx::fn::pow2(f[ih] + fp) + scitbx::fn::pow2(fdp))
+                  * c_h_[ih];
+          }
           f_sq[t->second] = f;
         }
         f_t n_s = static_cast<f_t>(r_transpose_.size());
@@ -261,7 +278,7 @@ namespace cctbx { namespace xray { namespace structure_factors {
         for(std::size_t i_sc=0;i_sc<scatterers.size();i_sc++) {
           if (!tabulated[i_sc]) continue;
           scatterer<f_t> const& sc = scatterers[i_sc];
-          std::size_t it = type_indices[sc.scattering_type];
+          std::size_t it = i_types[i_sc];
           f_t x = (sc.u_iso - u_min) / du;
           std::size_t ig = std::min(
             static_cast<std::size_t>(x), n_grid - 2);
