@@ -1,0 +1,15 @@
+from __future__ import absolute_import, division, print_function
+from libtbx import test_utils
+import libtbx.load_env
+
+tst_list = [
+  "$D/tst_pocketfft.py",
+  ]
+
+def run():
+  build_dir = libtbx.env.under_build("pocketfft_adaptbx")
+  dist_dir = libtbx.env.dist_path("pocketfft_adaptbx")
+  test_utils.run_tests(build_dir, dist_dir, tst_list)
+
+if (__name__ == "__main__"):
+  run()

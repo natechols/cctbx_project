@@ -1,0 +1,12 @@
+import sys
+Import("env_etc")
+if (not env_etc.no_boost_python):
+  Import("env_scitbx_boost_python_ext")
+  env = env_scitbx_boost_python_ext.Clone()
+  if (sys.platform != "win32"):
+    # (pocketfft uses std::thread)
+    env.Append(CXXFLAGS=["-pthread"])
+    env.Append(LINKFLAGS=["-pthread"])
+  env.SharedLibrary(
+    target="#lib/pocketfft_adaptbx_ext",
+    source=["ext.cpp"])

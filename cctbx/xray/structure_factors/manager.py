@@ -5,9 +5,29 @@ from cctbx import maptbx
 from cctbx import crystal
 from cctbx import math_module
 from scitbx import fftpack
+import os
 from libtbx import adopt_init_args
 
 default_cos_sin_table = math_module.cos_sin_table(2**10)
+
+# FFT library for the structure factors and gradients: "pocketfft"
+# (pocketfft_adaptbx: multi-threaded, faster; scitbx.fftpack is used if it
+# is not available) or "fftpack" (scitbx.fftpack); both have the same array
+# layouts, signs and scaling. The environment variable CCTBX_FFT_LIBRARY
+# overrides this setting.
+fft_library = "pocketfft"
+
+def _fft_module():
+  name = os.environ.get("CCTBX_FFT_LIBRARY", fft_library)
+  if (name == "pocketfft"):
+    try:
+      import pocketfft_adaptbx
+      return pocketfft_adaptbx
+    except ImportError:
+      pass
+  elif (name != "fftpack"):
+    raise RuntimeError("Unknown FFT library: %s" % name)
+  return fftpack
 
 class manager(crystal.symmetry):
 
@@ -118,14 +138,14 @@ class manager(crystal.symmetry):
 
   def rfft(self):
     if (self._rfft is None):
-      self._rfft = fftpack.real_to_complex_3d(
-        self.crystal_gridding().n_real())
+      lib = _fft_module()
+      self._rfft = lib.real_to_complex_3d(self.crystal_gridding().n_real())
     return self._rfft
 
   def cfft(self):
     if (self._cfft is None):
-      self._cfft = fftpack.complex_to_complex_3d(
-        self.crystal_gridding().n_real())
+      lib = _fft_module()
+      self._cfft = lib.complex_to_complex_3d(self.crystal_gridding().n_real())
     return self._cfft
 
   def u_base(self):
