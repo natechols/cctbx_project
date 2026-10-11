@@ -201,6 +201,12 @@ tls
   min_group_size = 50
     .type = int(value_min=1)
     .help = Default groups (one per chain) with fewer atoms are not used
+  find_groups = False
+    .type = bool
+    .help = If no tls.group is given: TLS groups from \
+            mmtbx.command_line.find_tls_groups (segments of the chains \
+            fitted to the ADPs of the starting model) instead of the TLS \
+            groups of the input model or one group per chain
   max_iterations = 25
     .type = int(value_min=1)
   joint = False
@@ -820,6 +826,37 @@ Usage examples:
           print("  (the input model has TLS groups: consider "
             "tls.enabled=True)", file=log)
 
+  def _find_tls_groups(self):
+    """TLS groups from mmtbx.command_line.find_tls_groups (selection
+    strings; empty if none are found)."""
+    from mmtbx.command_line import find_tls_groups
+    log = self.logger
+    model = self.model
+    not_h = ~model.get_hd_selection()
+    # (a copy: reset_i_seq() would change the atoms of the model)
+    hierarchy = model.get_hierarchy().deep_copy().select(not_h)
+    hierarchy.atoms().reset_i_seq()
+    xrs = model.get_xray_structure().select(not_h).deep_copy_scatterers()
+    params = find_tls_groups.master_phil.extract()
+    params.nproc = 1
+    params.random_seed = self.params.random_seed
+    try:
+      result = find_tls_groups.find_tls(
+        params                   = params,
+        pdb_hierarchy            = hierarchy,
+        xray_structure           = xrs,
+        return_as_list           = True,
+        ignore_pdb_header_groups = True,
+        out                      = null_out())
+    except Sorry as e:
+      print("TLS groups not found (%s): default groups are used." % str(e),
+        file=log)
+      return []
+    print("TLS groups found (find_tls_groups): %d" % len(result), file=log)
+    for s in result:
+      print("  %s" % s, file=log)
+    return list(result)
+
   def _chain_selections(self, selection_strings, label, min_size=1,
         allow_none=False, exclude_hydrogens=False):
     """
@@ -900,14 +937,16 @@ Usage examples:
     self.individual_adp = (p.adp and self.group_adp_selections is None)
     self.tls_presplit = False
     if (self.params.tls.enabled):
-      use_input = (self.input_tls is not None and
-        len([s for s in self.params.tls.group if s is not None]) == 0)
+      group_strings = [s for s in self.params.tls.group if s is not None]
+      if (len(group_strings) == 0 and self.params.tls.find_groups):
+        group_strings = self._find_tls_groups()
+      use_input = (self.input_tls is not None and len(group_strings) == 0)
       if (use_input):
         self.tls_selections = self.input_tls.selections
         strings = self.input_tls.strings
       else:
         self.tls_selections, strings = self._chain_selections(
-          self.params.tls.group, "TLS groups",
+          group_strings, "TLS groups",
           min_size = self.params.tls.min_group_size,
           allow_none = self.tls_auto,
           # (riding hydrogens are isotropic)

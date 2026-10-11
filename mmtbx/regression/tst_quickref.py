@@ -173,6 +173,37 @@ def exercise_convergence(model_file, data_file):
   assert "Converged" not in text
   assert len(r_work) == 6, r_work
 
+def exercise_find_tls_groups(model_file, data_file):
+  """tls.find_groups: TLS groups from mmtbx.command_line.find_tls_groups"""
+  import io, re
+  def run(model_file):
+    log = io.StringIO()
+    r = run_program(program_class=quickref.Program, args=[model_file,
+      data_file, "output.prefix=tst_quickref_find_tls",
+      "output.overwrite=True", "number_of_macro_cycles=1",
+      "write_map_coefficients=False", "tls.enabled=True",
+      "tls.find_groups=True"], logger=log)
+    return r, log.getvalue()
+  # identical B-factors: no groups found, the default group is used
+  r, text = run(model_file)
+  assert "TLS groups not found" in text, text
+  assert "TLS refinement: 1 groups" in text, text
+  # B-factors increasing along the chain
+  pdb_inp = iotbx.pdb.input(file_name=model_file)
+  h = pdb_inp.construct_hierarchy()
+  atoms = h.atoms()
+  atoms.set_b(flex.double([10 + 0.5*i + random.uniform(0, 2)
+    for i in range(atoms.size())]))
+  model_file_b = "tst_quickref_find_tls.pdb"
+  with open(model_file_b, "w") as f:
+    f.write(h.as_pdb_string(crystal_symmetry=pdb_inp.crystal_symmetry()))
+  r, text = run(model_file_b)
+  n = int(re.search(r"TLS groups found \(find_tls_groups\): (\d+)",
+    text).group(1))
+  assert n >= 1, text
+  assert re.search(r"TLS refinement: %d groups" % n, text), text
+  assert r.r_free < r.r_free_start
+
 def exercise_anisotropic(data_file):
   pdb_inp = iotbx.pdb.input(file_name="tst_quickref_start.pdb")
   xrs = pdb_inp.xray_structure_simple()
@@ -584,6 +615,7 @@ def run():
   exercise_anisotropic(data_file)
   exercise_reproducibility(model_file, data_file)
   exercise_convergence(model_file, data_file)
+  exercise_find_tls_groups(model_file, data_file)
   exercise(model_file, data_file)
   exercise_hydrogens(model_file, data_file)
   exercise_weight_optimization(model_file, data_file)

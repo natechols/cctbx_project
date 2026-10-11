@@ -750,11 +750,22 @@ def find_tls(params,
     raise Sorry(("%d atoms in the model contain isotropic B-factors <= 0:\n"+
       "\n".join(bad_atom_strings)) % (len(bad_i_seqs)))
   #
-  ssm = mmtbx.secondary_structure.manager(
-    pdb_hierarchy                = pdb_hierarchy,
-    sec_str_from_pdb_file        = None,
-    params                       = None,
-    log                          = out)
+  try:
+    ssm = mmtbx.secondary_structure.manager(
+      pdb_hierarchy                = pdb_hierarchy,
+      sec_str_from_pdb_file        = None,
+      params                       = None,
+      log                          = out)
+  except RuntimeError as e:
+    if ("ksdssp" not in str(e)): raise
+    # ksdssp is not available: secondary structure from the CA positions
+    ss_params = mmtbx.secondary_structure.sec_str_master_phil.extract()
+    ss_params.secondary_structure.protein.search_method = "from_ca"
+    ssm = mmtbx.secondary_structure.manager(
+      pdb_hierarchy                = pdb_hierarchy,
+      sec_str_from_pdb_file        = None,
+      params                       = ss_params.secondary_structure,
+      log                          = out)
   alpha_h_selection = ssm.helix_selection()
   secondary_structure_selection = ssm.helix_selection() | \
       ssm.beta_selection() | ssm.base_pair_selection()
