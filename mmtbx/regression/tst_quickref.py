@@ -151,6 +151,28 @@ def exercise_reproducibility(model_file, data_file):
   assert results[0].r_free == results[1].r_free
   assert results[2].r_free < results[2].r_free_start
 
+def exercise_convergence(model_file, data_file):
+  """macro-cycles stop when r_work changes by less than convergence_r_work"""
+  import io, re
+  def run(args):
+    log = io.StringIO()
+    r = run_program(program_class=quickref.Program, args=[model_file,
+      data_file, "output.prefix=tst_quickref_conv", "output.overwrite=True",
+      "number_of_macro_cycles=6", "write_map_coefficients=False",
+      "tls.enabled=False"] + args, logger=log)
+    text = log.getvalue()
+    r_work = [float(v) for v in re.findall(r"macro-cycle \d+: r_work=(\S+)",
+      text)]
+    return r, text, r_work
+  r, text, r_work = run(["convergence_r_work=0.002"])
+  assert "Converged" in text, text
+  assert 2 <= len(r_work) < 6, r_work
+  assert abs(r_work[-1] - r_work[-2]) < 0.002, r_work
+  assert r.r_work == r_work[-1] or abs(r.r_work - r_work[-1]) < 1.e-4
+  r, text, r_work = run(["convergence_r_work=0"])
+  assert "Converged" not in text
+  assert len(r_work) == 6, r_work
+
 def exercise_anisotropic(data_file):
   pdb_inp = iotbx.pdb.input(file_name="tst_quickref_start.pdb")
   xrs = pdb_inp.xray_structure_simple()
@@ -561,6 +583,7 @@ def run():
   model_file, data_file = make_inputs("tst_quickref")
   exercise_anisotropic(data_file)
   exercise_reproducibility(model_file, data_file)
+  exercise_convergence(model_file, data_file)
   exercise(model_file, data_file)
   exercise_hydrogens(model_file, data_file)
   exercise_weight_optimization(model_file, data_file)

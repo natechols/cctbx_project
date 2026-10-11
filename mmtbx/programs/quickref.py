@@ -27,8 +27,15 @@ refinement
 {
   number_of_macro_cycles = 5
     .type = int(value_min=1)
-    .help = Number of macro-cycles. Each macro-cycle updates the bulk-solvent \
-            and scale parameters, then minimizes the target.
+    .help = Maximum number of macro-cycles. Each macro-cycle updates the \
+            bulk-solvent and scale parameters, then minimizes the target.
+  convergence_r_work = 0.001
+    .type = float(value_min=0)
+    .help = Stop when r_work changes by less than this in a macro-cycle \
+            (after at least min_macro_cycles). With 0, all \
+            number_of_macro_cycles are done. r_free is not used.
+  min_macro_cycles = 2
+    .type = int(value_min=1)
   max_iterations = 50
     .type = int(value_min=1)
     .help = Maximum number of LBFGS iterations per macro-cycle
@@ -447,6 +454,7 @@ Usage examples:
     if (self.params.weights.optimize and
         (self.individual_sites or self.individual_adp)):
       self._optimize_weights()
+    r_work_previous = fmodel.r_work()
     for cycle in range(p.number_of_macro_cycles):
       if (cycle > 0):
         # outliers are rejected only once, at the start
@@ -461,6 +469,15 @@ Usage examples:
       print("macro-cycle %d: r_work=%.4f r_free=%.4f %s iterations=%d" % (
         cycle+1, fmodel.r_work(), fmodel.r_free(), self._geometry_summary(),
         n_iter), file=log)
+      r_work_change = abs(fmodel.r_work() - r_work_previous)
+      r_work_previous = fmodel.r_work()
+      if (cycle + 1 >= p.min_macro_cycles
+          and cycle + 1 < p.number_of_macro_cycles
+          and r_work_change < p.convergence_r_work):
+        print("Converged (r_work changed by %.4f < %g): stopping after %d "
+          "macro-cycles." % (r_work_change, p.convergence_r_work, cycle+1),
+          file=log)
+        break
     self.r_work = fmodel.r_work()
     self.r_free = fmodel.r_free()
     self._write_output()
