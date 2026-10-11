@@ -196,6 +196,25 @@ tls
     .help = Default groups (one per chain) with fewer atoms are not used
   max_iterations = 25
     .type = int(value_min=1)
+  joint = False
+    .type = bool
+    .help = Experimental: refine the TLS parameters simultaneously with \
+            the coordinates and individual ADPs (in the minimizer of the \
+            individual parameters, mmtbx.refinement.minimization \
+            tls_groups, with the target of the minimizer) instead of in a \
+            separate step (least-squares target). In a benchmark of 16 \
+            structures, R-free was 0.0023 higher on average (worse at low \
+            resolution) for 3% less time.
+  joint_ls_first_cycle = False
+    .type = bool
+    .help = With tls.joint: refine the TLS parameters in a separate step \
+            (least-squares target) in the first macro-cycle, and jointly \
+            in the following macro-cycles
+  joint_refine_trace_t = True
+    .type = bool
+    .help = With tls.joint: refine the trace of T (equivalent to a change \
+            of the u_iso of all atoms of the group, but the shifts of u_iso \
+            are limited in each minimization)
 }
 reference_coordinate_restraints
   .short_caption = Reference coordinate restraints
@@ -451,10 +470,14 @@ Usage examples:
     """One macro-cycle of refinement (self.fmodel, self.model); returns the
     number of LBFGS iterations of the individual refinement."""
     p = self.params.refinement
+    self._first_macro_cycle = first
     if (self.rigid_body_selections is not None):
       self._refine_rigid_body()
     if (self.tls_selections is not None):
-      self._refine_tls(first = first)
+      if (self._tls_joint(first)):
+        self._tls_start(first = first)
+      else:
+        self._refine_tls(first = first)
     sites, adp = self.individual_sites, self.individual_adp
     if (not sites and not adp):
       steps = []
@@ -952,41 +975,13 @@ Usage examples:
     groups are split into the TLS contribution (U_aniso) and an individual
     isotropic contribution, which is refined in the ADP step.
     """
-    # TODO: investigate refining TLS together with the other parameters
-    # (e.g. in the joint minimizer, with the TLS curvatures from
-    # mmtbx.refinement.group_curvatures) instead of in a separate step, and
-    # the choice of the target (ls_wunit_k1, as in phenix.refine).
+    # (with tls.joint=True, the TLS parameters are refined in the joint
+    # minimizer instead: _tls_start() and _minimize())
     from mmtbx.tls import tools
     p = self.params.refinement
     fmodel = self.fmodel
-    xrs = fmodel.xray_structure
     tls_isel = self.tls_selection_bool.iselection()
-    if (first and not self.tls_presplit):
-      scatterers = xrs.scatterers()
-      for i_seq in tls_isel:
-        sc = scatterers[i_seq]
-        if (not sc.flags.use_u_aniso()):
-          sc.u_star = (0,0,0,0,0,0)
-        sc.flags.set_use_u_iso(True)
-        sc.flags.set_use_u_aniso(True)
-      tools.split_u(xrs, self.tls_selections, offset = True)
-      fmodel.update_xray_structure(update_f_calc = True)
-    # The TLS parameters are fitted to the ADPs only at the start; then the
-    # refinement starts from the current TLS parameters (or from those of
-    # the input model). Without start_tls_value, tls_refinement fits them
-    # to the ADPs again (tls_from_u_cart), which takes about as long as the
-    # TLS refinement itself and does not lower R-free.
-    if (first and not self.tls_presplit):
-      # (tls_refinement would fit with 100 macro-cycles of up to 100
-      # iterations for each of three parameter subsets, most of them after
-      # convergence; small groups may not converge)
-      self.model.tls_groups.tlsos = tools.tls_from_u_cart(
-        xray_structure         = xrs,
-        tlsos_initial          = self.model.tls_groups.tlsos,
-        tls_selections         = self.tls_selections,
-        number_of_macro_cycles = 10,
-        max_iterations         = 100,
-        convergence_tolerance  = 1.e-6)
+    self._tls_start(first = first, apply_tls = False)
     start_tls_value = self.model.tls_groups.tlsos
     target_name = fmodel.target_name
     fmodel.update(target_name = "ls_wunit_k1")
@@ -1013,6 +1008,101 @@ Usage examples:
       self._riding_h_adps_from_parents(self.model)
       fmodel.update_xray_structure(xray_structure =
         self.model.get_xray_structure(), update_f_calc = True)
+
+  def _tls_joint(self, first):
+    """True if the TLS parameters are refined in the joint minimizer in
+    this macro-cycle (tls.joint)."""
+    p = self.params.tls
+    return p.joint and not (first and p.joint_ls_first_cycle)
+
+  def _tls_start(self, first, apply_tls = True):
+    """
+    At the start (first macro-cycle, unless the input TLS are applied): the
+    ADPs of the atoms of the TLS groups are split into an anisotropic
+    (U_tls) and an isotropic contribution, and the TLS parameters are
+    fitted to the anisotropic contribution. With apply_tls, U_tls is then
+    set from the TLS parameters (for tls.joint=True).
+    """
+    from mmtbx.tls import tools
+    if (not first or self.tls_presplit): return
+    fmodel = self.fmodel
+    xrs = fmodel.xray_structure
+    tls_isel = self.tls_selection_bool.iselection()
+    scatterers = xrs.scatterers()
+    for i_seq in tls_isel:
+      sc = scatterers[i_seq]
+      if (not sc.flags.use_u_aniso()):
+        sc.u_star = (0,0,0,0,0,0)
+      sc.flags.set_use_u_iso(True)
+      sc.flags.set_use_u_aniso(True)
+    tools.split_u(xrs, self.tls_selections, offset = True)
+    fmodel.update_xray_structure(update_f_calc = True)
+    # The TLS parameters are fitted to the ADPs only at the start; then the
+    # refinement starts from the current TLS parameters (or from those of
+    # the input model). (Without start_tls_value, tls_refinement fits them
+    # to the ADPs again in each macro-cycle (tls_from_u_cart), which takes
+    # about as long as the TLS refinement itself and does not lower R-free;
+    # it would fit with 100 macro-cycles of up to 100 iterations for each
+    # of three parameter subsets, most of them after convergence; small
+    # groups may not converge.)
+    self.model.tls_groups.tlsos = tools.tls_from_u_cart(
+      xray_structure         = xrs,
+      tlsos_initial          = self.model.tls_groups.tlsos,
+      tls_selections         = self.tls_selections,
+      number_of_macro_cycles = 10,
+      max_iterations         = 100,
+      convergence_tolerance  = 1.e-6)
+    if (apply_tls):
+      tools.update_xray_structure_with_tls(
+        xray_structure = xrs,
+        selections     = self.tls_selections,
+        tlsos          = self.model.tls_groups.tlsos,
+        selections_1d  = tls_isel,
+        correct_adp    = False)
+      fmodel.update_xray_structure(update_f_calc = True)
+      self._sync_model()
+      if (self.model.riding_h_manager is not None):
+        self._riding_h_adps_from_parents(self.model)
+        fmodel.update_xray_structure(xray_structure =
+          self.model.get_xray_structure(), update_f_calc = True)
+
+  def _tls_after_joint_minimization(self):
+    """tls.joint=True: U_tls with the refined coordinates; non-positive
+    definite ADPs are corrected as in mmtbx.tls.tools.tls_refinement."""
+    from mmtbx.tls import tools
+    model = self.model
+    xrs = model.get_xray_structure()
+    tls_isel = self.tls_selection_bool.iselection()
+    tools.update_xray_structure_with_tls(
+      xray_structure = xrs,
+      selections     = self.tls_selections,
+      tlsos          = model.tls_groups.tlsos,
+      selections_1d  = tls_isel,
+      correct_adp    = False)
+    if (xrs.is_positive_definite_u().count(False) > 0):
+      xrs.tidy_us(u_min = 1.e-6)
+      model.tls_groups.tlsos = tools.make_tlso_compatible_with_u_positive_definite(
+        tlsos                            = model.tls_groups.tlsos,
+        xray_structure                   = xrs.deep_copy_scatterers(),
+        selections                       = self.tls_selections,
+        max_iterations                   = 10,
+        number_of_u_nonpositive_definite = 0,
+        eps                              = 1.e-6,
+        refine_T                         = True,
+        refine_L                         = True,
+        refine_S                         = True,
+        out                              = null_out(),
+        number_of_macro_cycles_for_tls_from_uanisos = 10)
+      tools.update_xray_structure_with_tls(
+        xray_structure = xrs,
+        selections     = self.tls_selections,
+        tlsos          = model.tls_groups.tlsos,
+        selections_1d  = tls_isel)
+    model.set_xray_structure(xrs)
+    if (model.riding_h_manager is not None):
+      self._riding_h_adps_from_parents(model)
+    self.fmodel.update_xray_structure(
+      xray_structure = model.get_xray_structure(), update_f_calc = True)
 
   def _setup_reference_coordinate_restraints(self):
     """Restraints of the selected atoms to the starting coordinates."""
@@ -1200,6 +1290,12 @@ Usage examples:
   def _minimize(self, refine_sites, refine_adp, w, occupancy_groups=None):
     p = self.params.refinement
     self._set_flags(refine_sites, refine_adp)
+    tls_groups = None
+    if (refine_adp and self.tls_selections is not None
+        and self._tls_joint(first = self._first_macro_cycle)):
+      tls_groups = group_args(
+        selections = self.tls_selections,
+        tlsos      = self.model.tls_groups.tlsos)
     self.fmodel.update_xray_structure(
       xray_structure=self.model.get_xray_structure(), update_f_calc=True)
     m = minimization.lbfgs(
@@ -1221,7 +1317,12 @@ Usage examples:
       occupancy_min            = p.occupancy_min,
       occupancy_max            = p.occupancy_max,
       smooth_target            = p.smooth_target,
-      riding_h                 = (self.model.riding_h_manager is not None))
+      riding_h                 = (self.model.riding_h_manager is not None),
+      tls_groups               = tls_groups,
+      tls_refine_trace_t       = self.params.tls.joint_refine_trace_t)
+    if (tls_groups is not None):
+      self.model.tls_groups.tlsos = m.tls_result
+      self._tls_after_joint_minimization()
     return m.minimizer.iter()
 
   def _refine_occupancies(self):

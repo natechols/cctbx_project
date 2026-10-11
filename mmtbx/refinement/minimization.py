@@ -49,7 +49,9 @@ class lbfgs(object):
                      occupancy_min            = 0.0,
                      occupancy_max            = 1.0,
                      smooth_target            = False,
-                     riding_h                 = False):
+                     riding_h                 = False,
+                     tls_groups               = None,
+                     tls_refine_trace_t       = False):
     """
     occupancy_groups (e.g. from mmtbx.refinement.occupancies.
     occupancy_selections) are refined simultaneously with the coordinates
@@ -96,6 +98,20 @@ class lbfgs(object):
     simultaneous refinement of coordinates, ADPs and occupancies (unlike
     the riding model without riding_h, which keeps the hydrogen positions
     as parameters with zero shifts).
+
+    tls_groups (group_args with selections and tlsos) are refined
+    simultaneously with the other parameters (refine_adp=True, isotropic
+    ADPs): the atoms of a TLS group have U = U_tls + u_iso (use_u_iso and
+    use_u_aniso), u_iso is refined as usual, and U_tls is computed from the
+    TLS parameters of the group (with the coordinates at the start of the
+    minimization). The gradients with respect to U_cart of these atoms
+    (X-ray target, and the ADP restraints through U_eq) are summed for the
+    TLS parameters (mmtbx.tls d_target_d_tls); the curvatures are those of
+    mmtbx.refinement.group_curvatures. The trace of T is not refined: an
+    isotropic change of T is the same as a change of the u_iso of all atoms
+    of the group, so the diagonal of T is refined in a traceless basis (2
+    parameters), with T12, T13, T23, L and S: 20 parameters per group.
+    The refined TLS parameters are in self.tls_result (list of tlso).
     """
     timer = user_plus_sys_time()
     adopt_init_args(self, locals())
@@ -158,6 +174,9 @@ class lbfgs(object):
       if(self.riding_h_manager is None):
         raise Sorry("riding_h=True requires a riding hydrogen manager.")
       self._setup_riding_h()
+    self._tls = None
+    if(tls_groups is not None and len(tls_groups.selections) > 0):
+      self._setup_tls()
     self._setup_occupancy_groups()
     self._scatterers_start = self.xray_structure.scatterers()
     self._fixed_normalization = {}
@@ -228,7 +247,7 @@ class lbfgs(object):
     self._occ = None
     groups = self.occupancy_groups
     if(groups is None): groups = []
-    if(len(groups) == 0 and self._riding is None):
+    if(len(groups) == 0 and self._riding is None and self._tls is None):
       self.x = flex.double(self.xray_structure.n_parameters(), 0)
       return
     if(len(groups) > 0 and self.riding_h_manager is not None
@@ -259,6 +278,14 @@ class lbfgs(object):
     if(self._riding is not None):
       self._riding_slot_maps(n_full)
       other_slots = other_slots & ~self._riding.dependent_slots
+    if(self._tls is not None):
+      # (the U_cart of the atoms of TLS groups are not parameters)
+      self._tls.u_aniso_slots, self._tls.u_aniso_codes = self._slots(n_full,
+        u_aniso_gradients = flex.sym_mat3_double(
+          flex.double(range(1, 6*n_sc+1))))
+      is_tls = self._tls.is_tls
+      other_slots.set_selected(self._tls.u_aniso_slots.select(
+        is_tls.select(self._tls.u_aniso_codes / 6)), False)
     table = []
     par = flex.double()
     occ = scatterers.extract_occupancies()
@@ -271,6 +298,7 @@ class lbfgs(object):
         sel_bools.append(flex.bool(n_sc, sel))
       table.append(indices)
     n_other = other_slots.count(True)
+    occ_par = occupancies.pack_unpack(x = par, table = table)
     self._occ = group_args(
       groups      = groups,
       table       = table,
@@ -282,9 +310,14 @@ class lbfgs(object):
       occ_atoms   = flex.bool(n_sc, i_sel).iselection(),
       n_full      = n_full,
       n_other     = n_other,
+      n_occ       = occ_par.size(),
       i_other     = flex.size_t(range(n_other)))
     self.x = flex.double(n_other, 0)
-    self.x.extend(occupancies.pack_unpack(x = par, table = table))
+    self.x.extend(occ_par)
+    if(self._tls is not None):
+      # TLS parameters: shifts from the start
+      self.x.extend(flex.double(
+        self._tls_n_par()*len(self._tls.groups), 0))
 
   def _setup_riding_h(self):
     """Hydrogen atoms riding on their parent atoms (riding_h=True)."""
@@ -327,6 +360,166 @@ class lbfgs(object):
       h_bool       = is_dependent,
       parameterization = rhm.parameterization_cpp)
     self._apply_riding()
+
+  def _slots(self, n_full, **kwds):
+    """Positions in the full (packed by the scatterer flags) parameter array
+    and the codes (index into the per-atom array) of the parameters given
+    by the keyword (as for xray.minimization.add_gradients)."""
+    codes = flex.double(n_full, 0)
+    xray.minimization.add_gradients(
+      scatterers = self.xray_structure.scatterers(),
+      xray_gradients = codes, **kwds)
+    sel = (codes > 0).iselection()
+    return sel, (codes.select(sel) - 1).iround().as_size_t()
+
+  # TLS groups (tls_groups): 20 parameters per group (see __init__)
+  _tls_s2 = 2**0.5
+  _tls_s6 = 6**0.5
+
+  def _setup_tls(self):
+    from mmtbx.tls import tools
+    xrs = self.xray_structure
+    if(not self.refine_adp):
+      raise Sorry("TLS groups require refine_adp=True.")
+    if(self.neutron_refinement):
+      raise Sorry("TLS groups are not available for neutron refinement.")
+    scatterers = xrs.scatterers()
+    n_sc = scatterers.size()
+    sites_cart = xrs.sites_cart()
+    is_tls = flex.bool(n_sc, False)
+    groups = []
+    for sel, tlso in zip(self.tls_groups.selections, self.tls_groups.tlsos):
+      if(not isinstance(sel, flex.size_t)):
+        sel = flex.size_t(list(sel))
+      assert is_tls.select(sel).count(True) == 0 # no overlaps
+      is_tls.set_selected(sel, True)
+      groups.append(group_args(
+        isel       = sel,
+        origin     = tlso.origin,
+        sites_cart = sites_cart.select(sel),
+        v_start    = list(tlso.t) + list(tlso.l) + list(tlso.s)))
+    for i_seq in is_tls.iselection():
+      f = scatterers[i_seq].flags
+      if(not (f.use_u_iso() and f.use_u_aniso())):
+        raise Sorry("Atoms of TLS groups must have use_u_iso and use_u_aniso.")
+      f.set_grad_u_iso(True)
+      f.set_grad_u_aniso(True)
+    self._tls = group_args(
+      groups      = groups,
+      is_tls      = is_tls,
+      sites_cart_start = sites_cart,
+      curvatures  = None,
+      d_target_d_tls = tools.d_target_d_tls,
+      uaniso_from_tls_one_group = tools.uaniso_from_tls_one_group,
+      tlso        = tools.tlso)
+    self.tls_result = [tools.tlso(t = g.v_start[:6], l = g.v_start[6:12],
+      s = g.v_start[12:], origin = g.origin) for g in groups]
+
+  def tls_sites_cart_start(self):
+    """Coordinates for which the U_cart of the TLS groups are computed (at
+    the start of the minimization)."""
+    return self._tls.sites_cart_start
+
+  def _tls_parameters(self):
+    o = self._occ
+    return self.x[o.n_other + o.n_occ:]
+
+  def _tls_n_par(self):
+    return [20, 21][int(self.tls_refine_trace_t)]
+
+  def _tls_values(self, p):
+    """The 21 TLS values (T, L, S) of a group from its 20 parameters
+    (shifts from the start; 21 with tls_refine_trace_t)."""
+    if(self.tls_refine_trace_t):
+      return list(p)
+    s2, s6 = self._tls_s2, self._tls_s6
+    d = [p[0]/s2 + p[1]/s6, -p[0]/s2 + p[1]/s6, -2*p[1]/s6]
+    return d + list(p[2:5]) + list(p[5:11]) + list(p[11:20])
+
+  def _tls_parameter_gradients(self, g, curvatures = False):
+    """Gradients (or curvatures) of the 20 parameters of a group from those
+    of the 21 TLS values."""
+    if(self.tls_refine_trace_t):
+      return list(g)
+    s2, s6 = self._tls_s2, self._tls_s6
+    if(curvatures):
+      head = [(g[0] + g[1])/2, (g[0] + g[1] + 4*g[2])/6]
+    else:
+      head = [(g[0] - g[1])/s2, (g[0] + g[1] - 2*g[2])/s6]
+    return head + list(g[3:])
+
+  def _apply_tls(self):
+    """U_cart of the atoms of the TLS groups from the TLS parameters."""
+    t = self._tls
+    xrs = self.xray_structure
+    scatterers = xrs.scatterers()
+    u_cart = flex.sym_mat3_double(scatterers.size(), (0,0,0,0,0,0))
+    p_all = self._tls_parameters()
+    self.tls_result = []
+    for i_g, g in enumerate(t.groups):
+      n = self._tls_n_par()
+      d = self._tls_values(p_all[n*i_g:n*(i_g+1)])
+      v = [a + b for a, b in zip(g.v_start, d)]
+      tlso = t.tlso(t = v[:6], l = v[6:12], s = v[12:], origin = g.origin)
+      self.tls_result.append(tlso)
+      u_cart.set_selected(g.isel, t.uaniso_from_tls_one_group(
+        tlso = tlso, sites_cart = g.sites_cart, zeroize_trace = True))
+    scatterers.set_u_cart(xrs.unit_cell(), u_cart, t.is_tls.iselection())
+
+  def _tls_gradients(self, full, curvatures = False):
+    """Gradients (or curvatures) of the TLS parameters from those of the
+    U_cart of the atoms of the TLS groups (full parameter array)."""
+    t = self._tls
+    if(curvatures):
+      return self._tls_curvatures()
+    n_sc = self.xray_structure.scatterers().size()
+    u = flex.double(6*n_sc, 0)
+    u.set_selected(t.u_aniso_codes, full.select(t.u_aniso_slots))
+    u = flex.sym_mat3_double(u)
+    result = flex.double()
+    for g in t.groups:
+      d = t.d_target_d_tls(
+        sites             = g.sites_cart,
+        origin            = g.origin,
+        d_target_d_uaniso = u.select(g.isel),
+        scale_l_and_s     = True,
+        use_trace_s_zero_constraint = True)
+      result.extend(flex.double(self._tls_parameter_gradients(
+        list(d.grad_T()) + list(d.grad_L()) + list(d.grad_S()))))
+    return result
+
+  def _tls_adp_restraints_on_u_eq(self):
+    """True if the ADP restraints of the atoms of TLS groups are functions
+    of U_eq (u_iso + U_tls), False if of u_iso only (use_u_local_only)."""
+    return (self._tls is not None and
+            not getattr(self.iso_restraints, "use_u_local_only", False))
+
+  def _tls_u_eq_to_u_cart(self, values, factor):
+    """For the atoms of TLS groups, values * factor on the diagonal of
+    U_cart (zero for the other atoms)."""
+    n_sc = values.size()
+    isel = self._tls.is_tls.iselection()
+    v = values.select(isel) * factor
+    u = flex.double(6*n_sc, 0)
+    for k in range(3):
+      u.set_selected(isel * 6 + k, v)
+    return flex.sym_mat3_double(u)
+
+  def _tls_curvatures(self):
+    """Curvatures of the weighted X-ray target with respect to the TLS
+    parameters (computed once, see mmtbx.refinement.group_curvatures)."""
+    t = self._tls
+    if(t.curvatures is None):
+      from mmtbx.refinement.group_curvatures import group_curvatures
+      gc = group_curvatures(fmodel = self.fmodels.fmodel_xray())
+      w = self.weights.wx * self.weights.wx_scale
+      result = flex.double()
+      for g in t.groups:
+        c = gc.tls_group(g.isel, g.origin) * w
+        result.extend(flex.double(self._tls_parameter_gradients(
+          list(c), curvatures = True)))
+      t.curvatures = result
+    return t.curvatures
 
   def _riding_slot_maps(self, n_full):
     """
@@ -415,7 +608,7 @@ class lbfgs(object):
     from mmtbx.refinement import occupancies
     o = self._occ
     return occupancies.pack_unpack(
-      x = self.x[o.n_other:], table = o.table)
+      x = self.x[o.n_other:o.n_other+o.n_occ], table = o.table)
 
   def _to_parameters(self, full, curvatures=False):
     """Per-atom packed gradients or curvatures -> parameters."""
@@ -433,6 +626,8 @@ class lbfgs(object):
       packed = occupancies.pack_gradients(x = group_values, table = o.table)
     result = full.select(o.other_slots)
     result.extend(packed)
+    if(self._tls is not None):
+      result.extend(self._tls_gradients(full, curvatures = curvatures))
     return result
 
   def _finalize_occupancies(self):
@@ -529,6 +724,8 @@ class lbfgs(object):
     if(o is not None):
       for value, sel_bool in zip(self._group_occupancies(), o.sel_bools):
         self.xray_structure.set_occupancies(value, sel_bool)
+    if(self._tls is not None):
+      self._apply_tls()
     if(self._riding is not None):
       self._apply_riding()
     #
@@ -696,6 +893,13 @@ class lbfgs(object):
           xray_gradients    = self.curvatures,
           u_iso_gradients   = u_iso_curvatures,
           u_aniso_gradients = u_aniso_curvatures)
+        if(self._tls_adp_restraints_on_u_eq() and
+           u_iso_curvatures is not None):
+          xray.minimization.add_gradients(
+            scatterers        = self.xray_structure.scatterers(),
+            xray_gradients    = self.curvatures,
+            u_aniso_gradients = self._tls_u_eq_to_u_cart(
+              u_iso_curvatures, 1/9))
       if(compute_gradients):
         w_a = self.adp_restraints_weight * adp_scale
         if(energies_adp.u_aniso_gradients is None):
@@ -703,6 +907,13 @@ class lbfgs(object):
             scatterers      = self.xray_structure.scatterers(),
             xray_gradients  = self.g,
             u_iso_gradients = energies_adp.u_iso_gradients * w_a)
+          if(self._tls_adp_restraints_on_u_eq()):
+            # the ADP restraints are functions of U_eq = u_iso + tr(U_tls)/3
+            xray.minimization.add_gradients(
+              scatterers        = self.xray_structure.scatterers(),
+              xray_gradients    = self.g,
+              u_aniso_gradients = self._tls_u_eq_to_u_cart(
+                energies_adp.u_iso_gradients * w_a, 1/3))
         else:
           energies_adp.u_aniso_gradients *= w_a
           if(energies_adp.u_iso_gradients is not None):
