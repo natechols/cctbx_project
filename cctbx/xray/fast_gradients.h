@@ -32,8 +32,58 @@ namespace cctbx { namespace xray {
         af::tiny<FloatType, base_t::max_n_rho_real_terms> as_occupancy_real_;
         FloatType as_occupancy_imag_;
         FloatType eight_pi_pow_3_2_w_d_;
+        // terms whose exponential is needed for the gradients (exp_terms())
+        af::tiny<bool, base_t::max_n_rho_real_terms> need_term_;
+        bool need_imag_;
 
       public:
+        /* Terms whose exponential is computed by exp_terms(): those
+           contributing to a gradient. grad_rho: gradients with respect to
+           the site or B; complex_map: the gradient map is complex (the
+           imaginary part of rho and the gradient with respect to fdp are
+           used); fdp: fdp of the scatterer.
+         */
+        void
+        set_needed_terms(
+          scatterer_flags const& scf,
+          bool grad_rho,
+          bool complex_map,
+          FloatType const& fdp)
+        {
+          need_term_.fill(false);
+          for (std::size_t i=0;i<this->n_rho_real_terms;i++) {
+            need_term_[i] =
+                 (grad_rho && this->as_real_[i] != 0)
+              || (scf.grad_occupancy() && as_occupancy_real_[i] != 0)
+              || ((scf.grad_fp() || (scf.grad_fdp() && complex_map))
+                  && i == i_const_term);
+          }
+          need_imag_ = complex_map && fdp != 0
+                    && (grad_rho || scf.grad_occupancy());
+        }
+
+        bool
+        need_imag() const { return need_imag_; }
+
+        /* Exponentials of the real terms at the grid point (d_sq or d), once
+           for all gradients; 0 for the terms that are not needed.
+         */
+        template <typename DistanceType>
+        void
+        exp_terms(DistanceType const& d_or_d_sq, FloatType* e_real) const
+        {
+          for (std::size_t i=0;i<this->n_rho_real_terms;i++) {
+            e_real[i] = need_term_[i] ? this->exp_term(d_or_d_sq, i) : 0;
+          }
+        }
+
+        FloatType
+        rho_imag_cached(FloatType const& e_imag) const
+        {
+          if (this->as_imag_ == 0) return 0;
+          return this->as_imag_ * e_imag;
+        }
+
         d_gaussian_fourier_transformed() {}
 
         d_gaussian_fourier_transformed(
@@ -161,11 +211,13 @@ namespace cctbx { namespace xray {
           FloatType& gr_site_2,
           FloatType c,
           scitbx::vec3<FloatType> const& d,
-          FloatType const& d_sq) const
+          FloatType const& d_sq,
+          const FloatType* e_real) const
         {
           c *= 2;
           for (std::size_t i=0;i<this->n_rho_real_terms;i++) {
-            FloatType f = this->bs_real_[i] * c * this->rho_real_term(d_sq, i);
+            if (this->as_real_[i] == 0) continue;
+            FloatType f = this->bs_real_[i] * c * (this->as_real_[i]*e_real[i]);
             gr_site_0 += d[0] * f;
             gr_site_1 += d[1] * f;
             gr_site_2 += d[2] * f;
@@ -179,10 +231,11 @@ namespace cctbx { namespace xray {
           FloatType& gr_site_2,
           FloatType c,
           scitbx::vec3<FloatType> const& d,
-          FloatType const& d_sq) const
+          FloatType const& d_sq,
+          FloatType const& e_imag) const
         {
           c *= 2;
-          FloatType f = this->bs_imag_ * c * this->rho_imag(d_sq);
+          FloatType f = this->bs_imag_ * c * rho_imag_cached(e_imag);
           gr_site_0 += d[0] * f;
           gr_site_1 += d[1] * f;
           gr_site_2 += d[2] * f;
@@ -194,12 +247,14 @@ namespace cctbx { namespace xray {
           FloatType& gr_site_1,
           FloatType& gr_site_2,
           FloatType c,
-          scitbx::vec3<FloatType> const& d) const
+          scitbx::vec3<FloatType> const& d,
+          const FloatType* e_real) const
         {
           c *= 2;
           for (std::size_t i=0;i<this->n_rho_real_terms;i++) {
+            if (this->as_real_[i] == 0) continue;
             scitbx::vec3<FloatType> bd = this->aniso_bs_real_[i] * d;
-            FloatType f = c * this->rho_real_term(d, i);
+            FloatType f = c * (this->as_real_[i]*e_real[i]);
             gr_site_0 += bd[0] * f;
             gr_site_1 += bd[1] * f;
             gr_site_2 += bd[2] * f;
@@ -212,11 +267,12 @@ namespace cctbx { namespace xray {
           FloatType& gr_site_1,
           FloatType& gr_site_2,
           FloatType c,
-          scitbx::vec3<FloatType> const& d) const
+          scitbx::vec3<FloatType> const& d,
+          FloatType const& e_imag) const
         {
           c *= 2;
           scitbx::vec3<FloatType> bd = this->aniso_bs_imag_ * d;
-          FloatType f = c * this->rho_imag(d);
+          FloatType f = c * rho_imag_cached(e_imag);
           gr_site_0 += bd[0] * f;
           gr_site_1 += bd[1] * f;
           gr_site_2 += bd[2] * f;
@@ -240,21 +296,26 @@ namespace cctbx { namespace xray {
         }
 
         FloatType
-        d_rho_real_d_b_iso(FloatType const& d_sq) const
+        d_rho_real_d_b_iso(
+          FloatType const& d_sq,
+          const FloatType* e_real) const
         {
           FloatType drdb(0);
           for(std::size_t i=0;i<this->n_rho_real_terms;i++) {
+            if (this->as_real_[i] == 0) continue;
             drdb += d_rho_d_b_iso_term(
-              d_sq, this->rho_real_term(d_sq, i), b_[i]);
+              d_sq, this->as_real_[i]*e_real[i], b_[i]);
           }
           return drdb;
         }
 
         FloatType
-        d_rho_imag_d_b_iso(FloatType const& d_sq) const
+        d_rho_imag_d_b_iso(
+          FloatType const& d_sq,
+          FloatType const& e_imag) const
         {
           return d_rho_d_b_iso_term(
-            d_sq, this->rho_imag(d_sq), b_[i_const_term]);
+            d_sq, rho_imag_cached(e_imag), b_[i_const_term]);
         }
 
         /* Mathematica script used to determine analytical gradients:
@@ -316,13 +377,15 @@ namespace cctbx { namespace xray {
           FloatType& gr_b_cart_4,
           FloatType& gr_b_cart_5,
           FloatType const& c,
-          scitbx::vec3<FloatType> const& d) const
+          scitbx::vec3<FloatType> const& d,
+          const FloatType* e_real) const
         {
           for (std::size_t i=0;i<this->n_rho_real_terms;i++) {
+            if (this->as_real_[i] == 0) continue;
             d_rho_d_b_cart_term(
               gr_b_cart_0, gr_b_cart_1, gr_b_cart_2,
               gr_b_cart_3, gr_b_cart_4, gr_b_cart_5,
-              c, d, this->rho_real_term(d, i), detb_[i], bcfmt_[i]);
+              c, d, this->as_real_[i]*e_real[i], detb_[i], bcfmt_[i]);
           }
         }
 
@@ -335,47 +398,43 @@ namespace cctbx { namespace xray {
           FloatType& gr_b_cart_4,
           FloatType& gr_b_cart_5,
           FloatType const& c,
-          scitbx::vec3<FloatType> const& d) const
+          scitbx::vec3<FloatType> const& d,
+          FloatType const& e_imag) const
         {
           d_rho_d_b_cart_term(
             gr_b_cart_0, gr_b_cart_1, gr_b_cart_2,
             gr_b_cart_3, gr_b_cart_4, gr_b_cart_5,
-            c, d, this->rho_imag(d),
+            c, d, rho_imag_cached(e_imag),
             detb_[i_const_term],
             bcfmt_[i_const_term]);
         }
 
-        template <typename DistanceType>
         FloatType
-        d_rho_real_d_occupancy(DistanceType const& d_or_d_sq) const
+        d_rho_real_d_occupancy(const FloatType* e_real) const
         {
           FloatType drdo(0);
           for (std::size_t i=0;i<this->n_rho_real_terms;i++) {
-            drdo -= as_occupancy_real_[i] * this->exp_term(d_or_d_sq, i);
+            drdo -= as_occupancy_real_[i] * e_real[i];
           }
           return drdo;
         }
 
-        template <typename DistanceType>
         FloatType
-        d_rho_imag_d_occupancy(DistanceType const& d_or_d_sq) const
+        d_rho_imag_d_occupancy(FloatType const& e_imag) const
         {
-          return -as_occupancy_imag_ * this->exp_term(d_or_d_sq);
+          return -as_occupancy_imag_ * e_imag;
         }
 
-        template <typename DistanceType>
         FloatType
-        d_rho_real_d_fp(DistanceType const& d_or_d_sq) const
+        d_rho_real_d_fp(const FloatType* e_real) const
         {
-          return -eight_pi_pow_3_2_w_d_
-                 * this->exp_term(d_or_d_sq, i_const_term);
+          return -eight_pi_pow_3_2_w_d_ * e_real[i_const_term];
         }
 
-        template <typename DistanceType>
         FloatType
-        d_rho_imag_d_fdp(DistanceType const& d_or_d_sq) const
+        d_rho_imag_d_fdp(const FloatType* e_real) const
         {
-          return d_rho_real_d_fp(d_or_d_sq);
+          return d_rho_real_d_fp(e_real);
         }
     };
 
@@ -672,6 +731,19 @@ namespace cctbx { namespace xray {
             scatterer.weight_without_occupancy(), scatterer.weight(),
             this->u_cart_cache_[i_u_cart[i_seq]], this->u_extra_);
         }
+        bool aniso = scatterer.flags.use_u_aniso();
+        bool complex_map = (ft_d_target_d_f_calc_real == 0);
+        bool imag = (fdp && complex_map);
+        bool grad_b = (aniso
+          ? (scatterer.flags.grad_u_aniso() || need_iso)
+          : (scatterer.flags.grad_u_iso() && scatterer.flags.use_u_iso()));
+        gaussian_ft.set_needed_terms(
+          scatterer.flags, scatterer.flags.grad_site() || grad_b,
+          complex_map, fdp);
+        // exponentials of the terms at the grid point, for all gradients
+        FloatType e_real[
+          detail::gaussian_fourier_transformed<FloatType>::max_n_rho_real_terms];
+        FloatType e_imag(0);
 #       include <cctbx/xray/sampling_loop.h>
           FloatType f_real(-1.e20); // could be uninitialized
           FloatType f_imag(-1.e20); // could be uninitialized
@@ -684,79 +756,66 @@ namespace cctbx { namespace xray {
             f_real = -ft_dt_dfc_gp.real();
             f_imag = -ft_dt_dfc_gp.imag();
           }
+          if (!aniso) {
+            gaussian_ft.exp_terms(d_sq, e_real);
+            if (gaussian_ft.need_imag()) e_imag = gaussian_ft.exp_term(d_sq);
+          }
+          else {
+            gaussian_ft.exp_terms(d, e_real);
+            if (gaussian_ft.need_imag()) e_imag = gaussian_ft.exp_term(d);
+          }
           if (scatterer.flags.grad_site()) {
-            if (!scatterer.flags.use_u_aniso()) {
+            if (!aniso) {
               gaussian_ft.d_rho_real_d_site(
-                gr_site_0, gr_site_1, gr_site_2, f_real, d, d_sq);
-              if (fdp && ft_d_target_d_f_calc_real == 0) {
+                gr_site_0, gr_site_1, gr_site_2, f_real, d, d_sq, e_real);
+              if (imag) {
                 gaussian_ft.d_rho_imag_d_site(
-                  gr_site_0, gr_site_1, gr_site_2, f_imag, d, d_sq);
+                  gr_site_0, gr_site_1, gr_site_2, f_imag, d, d_sq, e_imag);
               }
             }
             else {
               gaussian_ft.d_rho_real_d_site(
-                gr_site_0, gr_site_1, gr_site_2, f_real, d);
-              if (fdp && ft_d_target_d_f_calc_real == 0) {
+                gr_site_0, gr_site_1, gr_site_2, f_real, d, e_real);
+              if (imag) {
                 gaussian_ft.d_rho_imag_d_site(
-                  gr_site_0, gr_site_1, gr_site_2, f_imag, d);
+                  gr_site_0, gr_site_1, gr_site_2, f_imag, d, e_imag);
               }
             }
           }
-          if (!scatterer.flags.use_u_aniso()) {
-            if (scatterer.flags.grad_u_iso() && scatterer.flags.use_u_iso()) {
-              gr_b_iso += f_real * gaussian_ft.d_rho_real_d_b_iso(d_sq);
-              if (fdp && ft_d_target_d_f_calc_real == 0) {
-                gr_b_iso += f_imag * gaussian_ft.d_rho_imag_d_b_iso(d_sq);
+          if (grad_b) {
+            if (!aniso) {
+              gr_b_iso += f_real * gaussian_ft.d_rho_real_d_b_iso(
+                d_sq, e_real);
+              if (imag) {
+                gr_b_iso += f_imag * gaussian_ft.d_rho_imag_d_b_iso(
+                  d_sq, e_imag);
               }
             }
-          }
-          else {
-            if (scatterer.flags.grad_u_aniso() || need_iso) {
+            else {
               gaussian_ft.d_rho_real_d_b_cart(
                 gr_b_cart_0, gr_b_cart_1, gr_b_cart_2,
                 gr_b_cart_3, gr_b_cart_4, gr_b_cart_5,
-                f_real, d);
-              if (fdp && ft_d_target_d_f_calc_real == 0) {
+                f_real, d, e_real);
+              if (imag) {
                 gaussian_ft.d_rho_imag_d_b_cart(
                   gr_b_cart_0, gr_b_cart_1, gr_b_cart_2,
                   gr_b_cart_3, gr_b_cart_4, gr_b_cart_5,
-                  f_imag, d);
+                  f_imag, d, e_imag);
               }
             }
           }
           if (scatterer.flags.grad_occupancy()) {
-            if (!scatterer.flags.use_u_aniso()) {
-              gr_occupancy += f_real
-                            * gaussian_ft.d_rho_real_d_occupancy(d_sq);
-              if (fdp && ft_d_target_d_f_calc_real == 0) {
-                gr_occupancy += f_imag
-                              * gaussian_ft.d_rho_imag_d_occupancy(d_sq);
-              }
-            }
-            else {
-              gr_occupancy += f_real
-                            * gaussian_ft.d_rho_real_d_occupancy(d);
-              if (fdp && ft_d_target_d_f_calc_real == 0) {
-                gr_occupancy += f_imag
-                              * gaussian_ft.d_rho_imag_d_occupancy(d);
-              }
+            gr_occupancy += f_real * gaussian_ft.d_rho_real_d_occupancy(e_real);
+            if (imag) {
+              gr_occupancy += f_imag
+                            * gaussian_ft.d_rho_imag_d_occupancy(e_imag);
             }
           }
           if (scatterer.flags.grad_fp()) {
-            if (!scatterer.flags.use_u_aniso()) {
-              gr_fp += f_real * gaussian_ft.d_rho_real_d_fp(d_sq);
-            }
-            else {
-              gr_fp += f_real * gaussian_ft.d_rho_real_d_fp(d);
-            }
+            gr_fp += f_real * gaussian_ft.d_rho_real_d_fp(e_real);
           }
-          if (scatterer.flags.grad_fdp() && ft_d_target_d_f_calc_real == 0) {
-            if (!scatterer.flags.use_u_aniso()) {
-              gr_fdp += f_imag * gaussian_ft.d_rho_imag_d_fdp(d_sq);
-            }
-            else {
-              gr_fdp += f_imag * gaussian_ft.d_rho_imag_d_fdp(d);
-            }
+          if (scatterer.flags.grad_fdp() && complex_map) {
+            gr_fdp += f_imag * gaussian_ft.d_rho_imag_d_fdp(e_real);
           }
         CCTBX_XRAY_SAMPLING_LOOP_END
         if (need_iso) gr_b_iso = gr_b_cart_0 + gr_b_cart_1 + gr_b_cart_2;
