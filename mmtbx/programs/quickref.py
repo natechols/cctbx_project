@@ -418,9 +418,13 @@ Usage examples:
       scattering_table = self.params.scattering_table,
       model_filename   = model_name)
     model.set_log(null_out()) # restraints processing is verbose
-    model.process(make_restraints=True)
     if (self.params.add_hydrogens):
+      # the restraints are made after the hydrogens are placed; only the
+      # flips of symmetric side chains done by processing are needed before
+      model.get_hierarchy().flip_symmetric_amino_acids()
       model = self._add_hydrogens(model)
+    else:
+      model.process(make_restraints=True)
     if (model.get_hd_selection().count(True) > 0):
       model.setup_riding_h_manager(idealize = True)
       n_h = model.get_hd_selection().count(True)
