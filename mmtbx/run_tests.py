@@ -496,6 +496,7 @@ molprobity_tests = [
   "$D/validation/regression/tst_cbetadev_02.py",
   "$D/validation/regression/tst_undowser.py",
   "$D/regression/tst_statistics_output.py",
+  "$D/regression/tst_statistics_missing_data.py",
   "$D/regression/tst_geo_min_restraints_phil.py",
   "$D/regression/tst_model_vs_map.py",
   # validation/molprobity

@@ -1,6 +1,6 @@
 from __future__ import absolute_import, division, print_function
 from cctbx.array_family import flex
-import sys, math
+import os, sys, math
 from libtbx.str_utils import format_value, round_2_for_cif, round_4_for_cif
 from itertools import count
 import iotbx.cif.model
@@ -202,19 +202,70 @@ class geometry(object):
         return group_args(score = None, clashes = None)
       keep_hydrogens = True  # H present => clashscore() will not invoke reduce
     if self.cached_clash is None:
-      self.cached_clash = clashscore(
-        pdb_hierarchy   = self.pdb_hierarchy,
-        fast            = self.fast_clash,
-        condensed_probe = self.condensed_probe,
-        keep_hydrogens  = keep_hydrogens,
-        nuclear         = self.model.is_neutron())
+      self.cached_clash = self._clashscore(keep_hydrogens)
+      if self.cached_clash is None:
+        self.cached_clash = False # not computed, not retried
+    if self.cached_clash is False:
+      return group_args(score = None, clashes = None)
     return group_args(
       score   = self.cached_clash.get_clashscore(),
       clashes = self.cached_clash #XXX Bulky object -- REMOVE! - Not kidding,
           # it contains 1 probe output, which can be GigaBytes!
       )
 
+  def _clashscore(self, keep_hydrogens):
+    """
+    clashscore with the probe program if it is installed, otherwise with
+    mmtbx.probe2 (clashscore2); None if neither can be run, as callers must
+    tolerate a None score.
+    """
+    import libtbx.load_env
+    try:
+      if libtbx.env.has_module("probe"):
+        return clashscore(
+          pdb_hierarchy   = self.pdb_hierarchy,
+          fast            = self.fast_clash,
+          condensed_probe = self.condensed_probe,
+          keep_hydrogens  = keep_hydrogens,
+          nuclear         = self.model.is_neutron())
+      import iotbx.phil
+      import mmtbx.model
+      from iotbx.data_manager import DataManager
+      from mmtbx.programs import clashscore2 as clashscore2_program
+      from mmtbx.validation.clashscore2 import clashscore2
+      model = mmtbx.model.manager(
+        model_input       = None,
+        pdb_hierarchy     = self.pdb_hierarchy.deep_copy(),
+        crystal_symmetry  = self.model.crystal_symmetry(),
+        restraint_objects = self.model.get_restraint_objects(),
+        log               = null_out())
+      dm = DataManager(["model"])
+      dm.add_model("model", model)
+      params = iotbx.phil.parse(clashscore2_program.Program.master_phil_str,
+        process_includes = True).extract()
+      return clashscore2(params.probe,
+        data_manager    = dm,
+        fast            = self.fast_clash,
+        condensed_probe = self.condensed_probe,
+        keep_hydrogens  = keep_hydrogens,
+        nuclear         = self.model.is_neutron(),
+        out             = null_out())
+    except Exception:
+      return None
+
   def cablam(self):
+    # without the contour pickles (chem_data/cablam_data), cablamalyze() exits
+    # the program; the statistics are None instead
+    import libtbx.load_env
+    files = ["expected.%s%s" % (c, s) for c in ["general", "gly", "transpro",
+      "cispro"] for s in ["", "_CA"]] + ["motif.%s" % m for m in [
+      "regular_beta", "loose_alpha", "loose_threeten"]]
+    for f in files:
+      if libtbx.env.find_in_repositories(
+          relative_path = "chem_data/cablam_data/cablam.8000.%s.pickle" % f,
+          test = os.path.isfile) is None:
+        return group_args(outliers = None, disfavored = None,
+          ca_outliers = None, gui_table = None)
     result = cablam.cablamalyze(self.pdb_hierarchy, outliers_only=False,
       out=null_out(), quiet=True) # XXX Why it is different from others?
     gui_table = group_args(column_labels = result.gui_list_headers,
@@ -228,6 +279,14 @@ class geometry(object):
       gui_table   = gui_table)
 
   def rama_z_score(self):
+    # without the database (chem_data/rama_z), the values are None
+    import libtbx.load_env
+    if libtbx.env.find_in_repositories(
+        relative_path = "chem_data/rama_z/top8000_rama_z_dict.pkl",
+        test = os.path.isfile) is None:
+      none = lambda: group_args(value = None, std = None, n = 0)
+      return rama_z.result(whole = none(), helix = none(), sheet = none(),
+        loop = none())
     return rama_z.rama_z(models = [self.model], log = null_out()).get_result()
 
   def omega(self):
