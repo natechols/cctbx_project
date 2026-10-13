@@ -521,6 +521,24 @@ def exercise_twinning_check():
     "number_of_macro_cycles=1", "add_hydrogens=False",
     "twinning.check=False"], logger=null_out())
   assert r.twinning is None
+  # twin law in the model file (mmCIF _pdbx_reflns_twin): not used by the
+  # refinement (DataManager.get_fmodel() would make a twin fmodel)
+  cif_file = "tst_quickref_twin_start.cif"
+  with open(cif_file, "w") as f:
+    f.write(hierarchy.as_mmcif_string(crystal_symmetry=cs))
+    f.write("_pdbx_reflns_twin.domain_id 1\n_pdbx_reflns_twin.crystal_id 1\n"
+      "_pdbx_reflns_twin.diffrn_id 1\n_pdbx_reflns_twin.fraction 0.3\n"
+      "_pdbx_reflns_twin.operator k,h,-l\n")
+  dm = DataManager()
+  dm.process_model_file(cif_file)
+  assert dm.get_model().twin_law_from_model_input() == "k,h,-l"
+  log = io.StringIO()
+  r = run_program(program_class=quickref.Program, args=[cif_file,
+    "tst_quickref_twin_data_0.mtz", "output.prefix=tst_quickref_twin",
+    "output.overwrite=True", "write_map_coefficients=False",
+    "number_of_macro_cycles=1", "add_hydrogens=False"], logger=log)
+  assert "Twin law of the model file (k,h,-l) not used." in log.getvalue()
+  assert r.r_free < 0.05, r.r_free
 
 def exercise_input_tls():
   """TLS records in the input model, with residual B-factors"""

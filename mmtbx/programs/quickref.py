@@ -7,6 +7,7 @@ from cctbx import xray, adptbx
 from cctbx.array_family import flex
 import iotbx.pdb
 import mmtbx
+import mmtbx.f_model
 import mmtbx.refinement.adp_refinement
 import mmtbx.refinement.refinement_flags
 import mmtbx.refinement.occupancies
@@ -461,6 +462,18 @@ Usage examples:
     fmodel = self.data_manager.get_fmodel(
       scattering_table = self.params.scattering_table,
       model_filename   = model_name)
+    # get_fmodel() uses the twin law of the model file (e.g. the mmCIF
+    # _pdbx_reflns_twin.operator), but the refinement does not use twin laws
+    twin_law = getattr(fmodel, "twin_law_str", None)
+    if (twin_law is not None):
+      fmodel = mmtbx.f_model.manager(
+        f_obs          = fmodel.f_obs(),
+        r_free_flags   = fmodel.r_free_flags(),
+        xray_structure = fmodel.xray_structure,
+        mask_params    = fmodel.mask_params,
+        sf_and_grads_accuracy_params = fmodel.sfg_params,
+        origin         = fmodel.origin())
+      print("Twin law of the model file (%s) not used." % twin_law, file=log)
     self._setup_user_bulk_solvent(fmodel)
     model.set_log(null_out()) # restraints processing is verbose
     # residues without restraint definitions do not stop the refinement:
