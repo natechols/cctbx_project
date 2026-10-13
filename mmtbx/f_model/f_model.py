@@ -376,6 +376,7 @@ class manager(manager_mixin, metaclass=libtbx.utils.Tracker):
     self._origin = origin
     self._data_type = data_type
     self.russ = None
+    self._user_f_masks = None
     if(twin_law is not None): target_name = "twin_lsq_f"
     self.k_sol, self.b_sol, self.b_cart = k_sol, b_sol, b_cart
     self.bin_selections = bin_selections
@@ -756,6 +757,9 @@ class manager(manager_mixin, metaclass=libtbx.utils.Tracker):
     result.twin_law_str = self.twin_law_str
     result.k_h = self.k_h
     result.b_h = self.b_h
+    if(self._user_f_masks is not None):
+      result._user_f_masks = [
+        fm.select(selection=selection) for fm in self._user_f_masks]
     result._call_stats = self._call_stats # tracking!!
     if(in_place): # XXX USE THIS INSTEAD OF ABOVE
       # TODO: six.moves.zip this file
@@ -772,6 +776,13 @@ class manager(manager_mixin, metaclass=libtbx.utils.Tracker):
     if(d_max is None): d_max = 0
     return self.select(
       selection=self.f_obs().resolution_filter_selection(d_max=d_max,d_min=d_min))
+
+  def set_user_f_masks(self, f_masks):
+    """Replace the internally computed bulk solvent mask with user-supplied
+    structure factors. f_masks must be a list of complex Miller arrays
+    matching f_obs. Once set, update_xray_structure() will not recompute
+    the mask from the atomic model."""
+    self._user_f_masks = f_masks
 
   def update_xray_structure(self,
                             xray_structure      = None,
@@ -793,18 +804,21 @@ class manager(manager_mixin, metaclass=libtbx.utils.Tracker):
     f_masks = None
     f_mask_twin = None
     if(update_f_mask):
-      mngmsks = self.mask_manager.shell_f_masks(
-        xray_structure = self.xray_structure,
-        force_update   = force_update_f_mask)
-      curfmsks = self.f_masks()
-      if(mngmsks is not None):
-        f_masks = mngmsks[:] # copy
-      if(mngmsks is not None and curfmsks is not None):
-        assert len(curfmsks) == len(mngmsks), [len(curfmsks), len(mngmsks)]
-        for i in range(len(curfmsks)):
-          if( mngmsks[i].data().size() != curfmsks[i].data().size() ):
-            f_masks[i] = mngmsks[i].common_set(curfmsks[i])
-      f_mask_twin = self.mask_manager.shell_f_masks_twin()
+      if(self._user_f_masks is not None):
+        f_masks = self._user_f_masks
+      else:
+        mngmsks = self.mask_manager.shell_f_masks(
+          xray_structure = self.xray_structure,
+          force_update   = force_update_f_mask)
+        curfmsks = self.f_masks()
+        if(mngmsks is not None):
+          f_masks = mngmsks[:] # copy
+        if(mngmsks is not None and curfmsks is not None):
+          assert len(curfmsks) == len(mngmsks), [len(curfmsks), len(mngmsks)]
+          for i in range(len(curfmsks)):
+            if( mngmsks[i].data().size() != curfmsks[i].data().size() ):
+              f_masks[i] = mngmsks[i].common_set(curfmsks[i])
+        f_mask_twin = self.mask_manager.shell_f_masks_twin()
     if([f_calc, f_masks, f_calc_twin, f_mask_twin].count(None) == 4):
       set_core_flag = False
     else: set_core_flag = True
