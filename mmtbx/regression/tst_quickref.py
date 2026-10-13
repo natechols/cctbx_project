@@ -168,7 +168,9 @@ def exercise_convergence(model_file, data_file):
   assert "Converged" in text, text
   assert 2 <= len(r_work) < 6, r_work
   assert abs(r_work[-1] - r_work[-2]) < 0.002, r_work
-  assert r.r_work == r_work[-1] or abs(r.r_work - r_work[-1]) < 1.e-4
+  # final R-factors after the update of the mask and scales
+  r_work_final = float(re.search(r"Final: r_work=(\S+)", text).group(1))
+  assert abs(r.r_work - r_work_final) < 1.e-4, (r.r_work, r_work_final)
   r, text, r_work = run(["convergence_r_work=0"])
   assert "Converged" not in text
   assert len(r_work) == 6, r_work

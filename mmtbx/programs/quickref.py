@@ -515,6 +515,11 @@ Usage examples:
           "macro-cycles." % (r_work_change, p.convergence_r_work, cycle+1),
           file=log)
         break
+    # R-factors and map coefficients of the final model
+    fmodel.update_xray_structure(update_f_calc = True, update_f_mask = True)
+    fmodel.update_all_scales(remove_outliers = False)
+    print("Final: r_work=%.4f r_free=%.4f" % (fmodel.r_work(),
+      fmodel.r_free()), file=log)
     self.r_work = fmodel.r_work()
     self.r_free = fmodel.r_free()
     self._write_output()
