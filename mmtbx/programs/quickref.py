@@ -371,6 +371,11 @@ output
   write_map_coefficients = True
     .type = bool
     .help = Write 2mFo-DFc and mFo-DFc map coefficients (MTZ)
+  clashscore = False
+    .type = bool
+    .help = Compute the MolProbity clashscore of the starting and final \
+            models, with the riding hydrogens of the refinement (with probe \
+            if it is installed, otherwise with mmtbx.probe2, which is slower)
 }
 '''
 
@@ -513,10 +518,13 @@ Usage examples:
           n_aniso, file=log)
     self._setup_groups()
     fmodel.update_all_scales(remove_outliers = self.params.outlier_rejection)
+    self.geometry_start = self._geometry_rmsds()
     print("\nStart: r_work=%.4f r_free=%.4f %s" % (
-      fmodel.r_work(), fmodel.r_free(), self._geometry_summary()), file=log)
+      fmodel.r_work(), fmodel.r_free(),
+      self._geometry_summary(self.geometry_start)), file=log)
     self.r_work_start = fmodel.r_work()
     self.r_free_start = fmodel.r_free()
+    self.clashscore_start = self._clashscore()
     self.twinning = None
     if (self.params.twinning.check):
       self._check_twinning()
@@ -565,8 +573,13 @@ Usage examples:
     # R-factors and map coefficients of the final model
     fmodel.update_xray_structure(update_f_calc = True, update_f_mask = True)
     fmodel.update_all_scales(remove_outliers = False)
-    print("Final: r_work=%.4f r_free=%.4f" % (fmodel.r_work(),
-      fmodel.r_free()), file=log)
+    self.geometry_final = self._geometry_rmsds()
+    print("Final: r_work=%.4f r_free=%.4f %s" % (fmodel.r_work(),
+      fmodel.r_free(), self._geometry_summary(self.geometry_final)), file=log)
+    self.clashscore_final = self._clashscore()
+    if (self.clashscore_final is not None):
+      print("Clashscore: start=%.2f final=%.2f" % (self.clashscore_start,
+        self.clashscore_final), file=log)
     if (self.fixed_sites_selection is not None):
       print("WARNING: the coordinates of %d atoms without geometry restraints "
         "were fixed\n(see the warning at the start)." %
@@ -1712,10 +1725,59 @@ Usage examples:
       curvature_floor_fraction = p.curvature_floor_fraction)
     assert self.fmodel.xray_structure is model.get_xray_structure()
 
-  def _geometry_summary(self):
+  def _geometry_rmsds(self):
+    """Rmsd of the bond lengths and angles from the restraints (all atoms,
+    including riding hydrogens)."""
     es = self.model.restraints_manager_energies_sites()
-    return "rmsd(bonds)=%.4f rmsd(angles)=%.2f" % (
-      es.geometry.bond_deviations()[2], es.geometry.angle_deviations()[2])
+    return group_args(
+      bonds  = es.geometry.bond_deviations()[2],
+      angles = es.geometry.angle_deviations()[2])
+
+  def _geometry_summary(self, rmsds=None):
+    if (rmsds is None):
+      rmsds = self._geometry_rmsds()
+    return "rmsd(bonds)=%.4f rmsd(angles)=%.2f" % (rmsds.bonds, rmsds.angles)
+
+  # ---------------------------------------------------------------------------
+
+  def _clashscore(self):
+    """MolProbity clashscore of the current model (output.clashscore), with
+    its riding hydrogens, so that Reduce is not run. None if not requested or
+    if it cannot be computed."""
+    if (not self.params.output.clashscore):
+      return None
+    import libtbx.load_env
+    log = self.logger
+    hierarchy = self.model.get_hierarchy().deep_copy()
+    hierarchy.atoms().set_xyz(self.model.get_sites_cart())
+    try:
+      if (libtbx.env.has_module("probe")):
+        from mmtbx.validation.clashscore import clashscore
+        result = clashscore(pdb_hierarchy = hierarchy, fast = True,
+          condensed_probe = True, keep_hydrogens = True, out = null_out())
+      else:
+        import iotbx.phil
+        from iotbx.data_manager import DataManager
+        from mmtbx.programs import clashscore2 as clashscore2_program
+        from mmtbx.validation.clashscore2 import clashscore2
+        import mmtbx.model
+        model = mmtbx.model.manager(
+          model_input       = None,
+          pdb_hierarchy     = hierarchy,
+          crystal_symmetry  = self.model.crystal_symmetry(),
+          restraint_objects = self.model.get_restraint_objects(),
+          log               = null_out())
+        dm = DataManager(["model"])
+        dm.add_model("model", model)
+        params = iotbx.phil.parse(
+          clashscore2_program.Program.master_phil_str,
+          process_includes = True).extract()
+        result = clashscore2(params.probe, data_manager = dm, fast = True,
+          condensed_probe = True, keep_hydrogens = True, out = null_out())
+      return result.get_clashscore()
+    except Exception as e:
+      print("Clashscore not computed: %s" % str(e), file=log)
+      return None
 
   # ---------------------------------------------------------------------------
 
@@ -1768,6 +1830,10 @@ Usage examples:
       r_free_start    = self.r_free_start,
       r_work          = self.r_work,
       r_free          = self.r_free,
+      geometry_start  = self.geometry_start,
+      geometry_final  = self.geometry_final,
+      clashscore_start = self.clashscore_start,
+      clashscore_final = self.clashscore_final,
       model           = self.model,
       fmodel          = self.fmodel,
       model_file_name = self.model_file_name,

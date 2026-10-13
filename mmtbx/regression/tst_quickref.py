@@ -820,6 +820,18 @@ def exercise_weight_optimization(model_file, data_file):
   assert "Weight optimization: wxc_scale=" in text, text
   assert r.r_free < r.r_free_start
 
+def exercise_results(model_file, data_file):
+  """Geometry rmsds and (optional) clashscore of the start and final models
+  in the results."""
+  r = run_quickref(model_file, data_file, "tst_quickref_results")
+  for g in (r.geometry_start, r.geometry_final):
+    assert 0 < g.bonds < 1 and 0 < g.angles < 30, (g.bonds, g.angles)
+  assert r.clashscore_start is None and r.clashscore_final is None
+  r = run_quickref(model_file, data_file, "tst_quickref_results",
+    ["output.clashscore=True"])
+  assert r.clashscore_start is not None and r.clashscore_start >= 0
+  assert r.clashscore_final is not None and r.clashscore_final >= 0
+
 def run():
   random.seed(0)
   flex.set_random_seed(0)
@@ -830,6 +842,7 @@ def run():
   exercise_find_tls_groups(model_file, data_file)
   exercise_anomalous()
   exercise(model_file, data_file)
+  exercise_results(model_file, data_file)
   exercise_hydrogens(model_file, data_file)
   exercise_weight_optimization(model_file, data_file)
   exercise_occupancies()
