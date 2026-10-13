@@ -288,6 +288,25 @@ ncs
     include scope mmtbx.geometry_restraints.torsion_restraints.torsion_ncs.torsion_ncs_params
   }
 }
+bulk_solvent_map
+  .short_caption = User-supplied bulk solvent
+  .help = Bulk-solvent structure factors from a file (amplitudes and \
+          phases, e.g. from an explicit-solvent MD simulation), used instead \
+          of the flat-mask F_mask in F_model = k_total*(F_calc + \
+          k_mask*F_mask). k_mask is still determined per resolution bin. \
+          The mask is not recomputed from the model. Equivalent to \
+          FPART/PHIPART in Refmac.
+{
+  file_name = None
+    .type = path
+    .help = Reflection file with the bulk-solvent amplitudes and phases \
+            (can be the data file)
+  amplitudes_label = FPART
+    .type = str
+  phases_label = PHIPART
+    .type = str
+    .help = Phases in degrees
+}
 outlier_rejection = True
   .type = bool
   .help = Reject outlier reflections once, in the initial bulk-solvent and \
@@ -373,6 +392,7 @@ Usage examples:
   mmtbx.quickref model.pdb data.mtz
   mmtbx.quickref model.cif data.mtz number_of_macro_cycles=10
   mmtbx.quickref model.pdb data.mtz simultaneous=False use_curvatures=False
+  mmtbx.quickref model.pdb data.mtz bulk_solvent_map.file_name=solvent.mtz
 '''
 
   datatypes = ['model', 'miller_array', 'restraint', 'phil']
@@ -417,6 +437,7 @@ Usage examples:
     fmodel = self.data_manager.get_fmodel(
       scattering_table = self.params.scattering_table,
       model_filename   = model_name)
+    self._setup_user_bulk_solvent(fmodel)
     model.set_log(null_out()) # restraints processing is verbose
     # residues without restraint definitions do not stop the refinement:
     # their coordinates are fixed (see _setup_fixed_sites)
@@ -783,6 +804,54 @@ Usage examples:
       tlsos      = tlsos,
       u_tls      = u_tls,
       u_residual = u_residual)
+
+  def _setup_user_bulk_solvent(self, fmodel):
+    """User-supplied bulk-solvent structure factors (bulk_solvent_map) in
+    place of the flat-mask F_mask: aligned to the F_obs indices (reflections
+    missing from the file contribute nothing)."""
+    p = self.params.bulk_solvent_map
+    if (p.file_name is None): return
+    from iotbx import reflection_file_reader
+    log = self.logger
+    arrays = reflection_file_reader.any_reflection_file(
+      file_name = p.file_name).as_miller_arrays()
+    def find(label):
+      for ma in arrays:
+        if (label in ma.info().labels): return ma
+      raise Sorry("Column %s not found in %s (columns: %s)" % (label,
+        p.file_name, ", ".join([ma.info().label_string() for ma in arrays])))
+    amplitudes = find(p.amplitudes_label)
+    phases = find(p.phases_label)
+    if (amplitudes is phases):
+      # amplitudes and phases combined (as for adjacent F and P MTZ columns)
+      if (not amplitudes.is_complex_array()):
+        raise Sorry("%s and %s in %s are not amplitudes and phases." % (
+          p.amplitudes_label, p.phases_label, p.file_name))
+      f_user = amplitudes
+    else:
+      f_user = amplitudes.phase_transfer(phase_source = phases, deg = True)
+    f_obs = fmodel.f_obs()
+    if (f_user.space_group_info() is not None and
+        f_user.space_group().type().number() !=
+        f_obs.space_group().type().number()):
+      raise Sorry("The space group of %s (%s) differs from that of the "
+        "data (%s)." % (p.file_name, str(f_user.space_group_info()),
+        str(f_obs.space_group_info())))
+    f_user = f_user.customized_copy(
+      crystal_symmetry = f_obs.crystal_symmetry()).map_to_asu()
+    if (f_obs.anomalous_flag() and not f_user.anomalous_flag()):
+      f_user = f_user.generate_bijvoet_mates()
+    f_mask = f_user.matching_set(other = f_obs, data_substitute = 0j,
+      assert_is_similar_symmetry = False)
+    n_missing = f_obs.size() - f_obs.common_set(f_user).size()
+    fmodel.set_user_f_masks([f_mask])
+    print("Bulk solvent: user-supplied structure factors %s,%s from %s "
+      "(d_min=%.2f; the mask is not computed from the model)" % (
+      p.amplitudes_label, p.phases_label, p.file_name, f_user.d_min()),
+      file=log)
+    if (n_missing > 0):
+      print("  WARNING: %d of %d reflections are not in %s (no bulk-solvent "
+        "contribution)" % (n_missing, f_obs.size(), p.file_name), file=log)
 
   def _setup_anomalous(self, model, fmodel):
     """Anomalous data: report, and optionally set f' and f'' of the atoms

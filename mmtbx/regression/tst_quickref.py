@@ -409,6 +409,64 @@ HETATM   70  O1  ZQX B   1      26.500  39.700  26.300  1.00 20.00           O
     assert r.model.get_sites_cart().select(~sel & ~r.model.get_hd_selection(
       )).rms_difference(xrs.sites_cart()[:-3]) > 0.05
 
+def exercise_user_bulk_solvent():
+  # data with a "solvent" contribution (atoms not in the model): with the
+  # solvent structure factors supplied, R is much lower than with the flat
+  # mask, and the user F_mask is kept (also after outlier rejection)
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_str)
+  xrs = pdb_inp.xray_structure_simple()
+  solvent = iotbx.pdb.input(source_info=None, lines="""\
+CRYST1   50.840   42.770   28.950  90.00  90.00  90.00 P 21 21 21
+HETATM    1  O   HOH S   1      10.000  10.000  10.000  1.00 30.00           O
+HETATM    2  O   HOH S   2      15.000   5.000  20.000  1.00 30.00           O
+HETATM    3  O   HOH S   3       5.000  30.000   3.000  1.00 30.00           O
+HETATM    4  O   HOH S   4      40.000  15.000  12.000  1.00 30.00           O
+HETATM    5  O   HOH S   5      45.000  35.000  25.000  1.00 30.00           O
+HETATM    6  O   HOH S   6      20.000  20.000   5.000  1.00 30.00           O
+""").xray_structure_simple()
+  f_calc = xrs.structure_factors(d_min=2.0, algorithm="direct").f_calc()
+  f_solvent = f_calc.structure_factors_from_scatterers(solvent,
+    algorithm="direct").f_calc()
+  f_obs = abs(f_calc.customized_copy(data=f_calc.data()+f_solvent.data()))
+  flags = f_obs.generate_r_free_flags(fraction=0.1)
+  mtz = f_obs.as_mtz_dataset(column_root_label="F")
+  mtz.add_miller_array(flags, column_root_label="R-free-flags")
+  data_file = "tst_quickref_solv_data.mtz"
+  mtz.mtz_object().write(data_file)
+  mtz = f_solvent.as_mtz_dataset(column_root_label="FPART")
+  solvent_file = "tst_quickref_solv_fpart.mtz"
+  mtz.mtz_object().write(solvent_file)
+  model_file = "tst_quickref_solv_start.pdb"
+  with open(model_file, "w") as f:
+    f.write(pdb_inp.construct_hierarchy().as_pdb_string(
+      crystal_symmetry=xrs.crystal_symmetry()))
+  args = [model_file, data_file, "output.prefix=tst_quickref_solv",
+    "output.overwrite=True", "write_map_coefficients=False",
+    "number_of_macro_cycles=1", "add_hydrogens=False"]
+  r_flat = run_program(program_class=quickref.Program, args=args,
+    logger=null_out())
+  r_user = run_program(program_class=quickref.Program, args=args + [
+    "bulk_solvent_map.file_name=%s" % solvent_file,
+    "bulk_solvent_map.phases_label=PHIFPART"], logger=null_out())
+  assert r_user.r_work_start < 0.5 * r_flat.r_work_start, (
+    r_user.r_work_start, r_flat.r_work_start)
+  assert r_user.r_work < 0.5 * r_flat.r_work, (r_user.r_work, r_flat.r_work)
+  fm = r_user.fmodel
+  assert fm._user_f_masks is not None
+  assert fm._user_f_masks[0].indices().all_eq(fm.f_obs().indices())
+  assert fm.f_masks()[0].data().all_eq(fm._user_f_masks[0].data())
+  # (propagated through select)
+  sel = flex.bool(fm.f_obs().size(), True)
+  sel[0] = False
+  assert fm.select(sel)._user_f_masks[0].size() == sel.count(True)
+  # missing column
+  try:
+    run_program(program_class=quickref.Program, args=args + [
+      "bulk_solvent_map.file_name=%s" % solvent_file], logger=null_out())
+  except Sorry as e:
+    assert "Column PHIPART not found" in str(e), str(e)
+  else: raise AssertionError("Sorry expected")
+
 def exercise_input_tls():
   """TLS records in the input model, with residual B-factors"""
   import io, re
@@ -725,6 +783,7 @@ def run():
   exercise_groups()
   exercise_input_tls()
   exercise_unrestrained()
+  exercise_user_bulk_solvent()
   print("OK")
 
 if (__name__ == "__main__"):
