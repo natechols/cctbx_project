@@ -11,6 +11,37 @@ from libtbx import cpp_function_name
 symbol_not_found_pat = re.compile(
   r"[Ss]ymbol[ ]not[ ]found: \s* (\w+) $", re.X | re.M | re.S)
 
+def _sequence_iter(self):
+  i = 0
+  while (i < len(self)):
+    yield self[i]
+    i += 1
+
+_modules_with_sequence_iter = set()
+
+def add_sequence_iter(mod):
+  """
+  Wrapped sequences (flex arrays, af::shared, std::vector, ...) without
+  __iter__ are iterated by Python with __getitem__ until IndexError. This
+  IndexError is a C++ exception translated by Boost.Python, which costs
+  10-100 us (more with many extension modules loaded, at least on macOS),
+  i.e. much more than iterating over a short array. This adds an __iter__
+  that stops at len(self), with the same elements (self[i]).
+  """
+  if (mod.__name__ in _modules_with_sequence_iter): return
+  _modules_with_sequence_iter.add(mod.__name__)
+  def visit(scope, depth):
+    for v in list(vars(scope).values()):
+      if (not isinstance(v, type) or type(v).__name__ != "class"):
+        continue # not a Boost.Python class
+      if (v.__module__ != mod.__name__):
+        continue
+      d = vars(v)
+      if ("__getitem__" in d and "__len__" in d and "__iter__" not in d):
+        v.__iter__ = _sequence_iter
+      if (depth < 2): visit(v, depth+1)
+  visit(mod, 0)
+
 def import_ext(name, optional=False):
   components = name.split(".")
   if (len(components) > 1):
@@ -35,6 +66,7 @@ def import_ext(name, optional=False):
     mod = getattr(mod, comp)
   if (previous_dlopenflags is not None):
     sys.setdlopenflags(previous_dlopenflags)
+  add_sequence_iter(mod)
   return mod
 
 ext = import_ext("boost_python_meta_ext")
