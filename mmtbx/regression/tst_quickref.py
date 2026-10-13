@@ -467,6 +467,61 @@ HETATM    6  O   HOH S   6      20.000  20.000   5.000  1.00 30.00           O
     assert "Column PHIPART not found" in str(e), str(e)
   else: raise AssertionError("Sorry expected")
 
+def exercise_twinning_check():
+  import io
+  # the test model in P4 (twin law k,h,-l); data twinned with a twin
+  # fraction of 0.4: the twinning check warns (with the R-factors), the
+  # refinement is not changed; no warning for untwinned data
+  from cctbx import crystal
+  pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_str)
+  hierarchy = pdb_inp.construct_hierarchy()
+  cs = crystal.symmetry(unit_cell=(80, 80, 40, 90, 90, 90),
+    space_group_symbol="P 4")
+  xrs = hierarchy.extract_xray_structure(crystal_symmetry=cs)
+  f_calc = xrs.structure_factors(d_min=2.0, algorithm="direct").f_calc()
+  i_calc = abs(f_calc).set_observation_type_xray_amplitude().f_as_f_sq()
+  model_file = "tst_quickref_twin_start.pdb"
+  with open(model_file, "w") as f:
+    f.write(hierarchy.as_pdb_string(crystal_symmetry=cs))
+  flags = i_calc.generate_r_free_flags(fraction=0.1)
+  results = {}
+  for alpha in [0.4, 0]:
+    i_obs = i_calc.twin_data(twin_law="k,h,-l", alpha=alpha) if alpha > 0 \
+      else i_calc
+    f_obs = i_obs.f_sq_as_f()
+    f_obs = f_obs.customized_copy(sigmas=f_obs.data()*0.01+0.1)
+    mtz = f_obs.as_mtz_dataset(column_root_label="F")
+    mtz.add_miller_array(flags, column_root_label="R-free-flags")
+    data_file = "tst_quickref_twin_data_%g.mtz" % alpha
+    mtz.mtz_object().write(data_file)
+    log = io.StringIO()
+    r = run_program(program_class=quickref.Program, args=[model_file,
+      data_file, "output.prefix=tst_quickref_twin", "output.overwrite=True",
+      "write_map_coefficients=False", "number_of_macro_cycles=1",
+      "add_hydrogens=False"], logger=log)
+    results[alpha] = (r, log.getvalue())
+  r, text = results[0.4]
+  assert r.twinning is not None and r.twinning.confirmed
+  assert "WARNING: the data are probably twinned" in text, text
+  # (one twin law: k,h,-l, or the equivalent h,-k,-l)
+  assert len(r.twinning.twin_laws) == 1
+  law, h_alpha, britton_alpha, r_work, r_free, fraction = \
+    r.twinning.twin_laws[0]
+  assert law in ["k,h,-l", "h,-k,-l"], law
+  assert approx_equal(fraction, 0.4, eps=0.05), fraction
+  assert approx_equal(h_alpha, 0.4, eps=0.05), h_alpha
+  assert r_free < 0.5 * r.twinning.r_no_twin[1], (r_free, r.twinning.r_no_twin)
+  r, text = results[0]
+  assert r.twinning is None or not r.twinning.confirmed
+  assert "WARNING: the data are probably twinned" not in text
+  # twinning.check=False
+  r = run_program(program_class=quickref.Program, args=[model_file,
+    "tst_quickref_twin_data_0.4.mtz", "output.prefix=tst_quickref_twin",
+    "output.overwrite=True", "write_map_coefficients=False",
+    "number_of_macro_cycles=1", "add_hydrogens=False",
+    "twinning.check=False"], logger=null_out())
+  assert r.twinning is None
+
 def exercise_input_tls():
   """TLS records in the input model, with residual B-factors"""
   import io, re
@@ -784,6 +839,7 @@ def run():
   exercise_input_tls()
   exercise_unrestrained()
   exercise_user_bulk_solvent()
+  exercise_twinning_check()
   print("OK")
 
 if (__name__ == "__main__"):

@@ -307,6 +307,25 @@ bulk_solvent_map
     .type = str
     .help = Phases in degrees
 }
+twinning
+  .short_caption = Twinning check
+{
+  check = True
+    .type = bool
+    .help = Check for twinning (Xtriage intensity statistics and twin-law \
+            tests): if twinning is suspected, the R-factors of the starting \
+            model with and without each suspicious twin law are compared, \
+            and a warning is printed if a twin law lowers R-free. The \
+            refinement itself does not use twin laws.
+  min_twin_fraction = 0.05
+    .type = float(value_min=0, value_max=0.5)
+    .help = Twin laws with a larger estimated twin fraction (H or Britton \
+            test) are suspicious, and a refined twin fraction above this \
+            is required for the warning
+  min_r_free_decrease = 0.005
+    .type = float(value_min=0)
+    .help = Minimum decrease of R-free with the twin law for the warning
+}
 outlier_rejection = True
   .type = bool
   .help = Reject outlier reflections once, in the initial bulk-solvent and \
@@ -498,6 +517,9 @@ Usage examples:
       fmodel.r_work(), fmodel.r_free(), self._geometry_summary()), file=log)
     self.r_work_start = fmodel.r_work()
     self.r_free_start = fmodel.r_free()
+    self.twinning = None
+    if (self.params.twinning.check):
+      self._check_twinning()
     self.occupancy_groups = None
     if (p.occupancies):
       self.occupancy_groups = mmtbx.refinement.occupancies.\
@@ -549,6 +571,9 @@ Usage examples:
       print("WARNING: the coordinates of %d atoms without geometry restraints "
         "were fixed\n(see the warning at the start)." %
         self.fixed_sites_selection.count(True), file=log)
+    if (self.twinning is not None and self.twinning.confirmed):
+      print("WARNING: the data are probably twinned; the twin law(s) were not "
+        "used\n(see the warning at the start).", file=log)
     self.r_work = fmodel.r_work()
     self.r_free = fmodel.r_free()
     self._write_output()
@@ -852,6 +877,101 @@ Usage examples:
     if (n_missing > 0):
       print("  WARNING: %d of %d reflections are not in %s (no bulk-solvent "
         "contribution)" % (n_missing, f_obs.size(), p.file_name), file=log)
+
+  def _check_twinning(self):
+    """
+    Twinning check (does not change the refinement): Xtriage intensity
+    statistics and twin-law dependent tests. If twinning is suspected
+    (abnormal intensity statistics with possible twin laws, or a twin law
+    with an estimated twin fraction above twinning.min_twin_fraction), the
+    R-factors of the current model without and with each suspicious twin
+    law (twin fraction refined, least-squares twin target) are computed
+    for the same (merged) data, and a warning with the comparison is printed
+    if a twin law lowers R-free by at least twinning.min_r_free_decrease.
+    The result is kept in self.twinning (None if twinning is not suspected
+    or the check could not be done).
+    """
+    import mmtbx.utils
+    p = self.params.twinning
+    log = self.logger
+    fmodel = self.fmodel
+    try:
+      f_obs = fmodel.f_obs()
+      flags = fmodel.r_free_flags()
+      if (f_obs.anomalous_flag()):
+        f_obs = f_obs.average_bijvoet_mates()
+        flags = flags.customized_copy(
+          data = flags.data().as_double()).average_bijvoet_mates()
+        flags = flags.customized_copy(data = flags.data() > 0)
+      summary = f_obs.f_as_f_sq().analyze_intensity_statistics()
+      if (summary is None or summary.n_twin_laws == 0): return
+      abnormal = summary.has_abnormal_intensity_statistics()
+      suspicious = []
+      for i, law in enumerate(summary.twin_laws):
+        alphas = [a for a in [summary.h_alpha[i], summary.britton_alpha[i]]
+          if a is not None]
+        if (abnormal or (len(alphas) > 0 and
+                         max(alphas) > p.min_twin_fraction)):
+          suspicious.append((law, summary.h_alpha[i],
+            summary.britton_alpha[i]))
+      if (len(suspicious) == 0): return
+      def r_factors(twin_law):
+        fm = mmtbx.utils.fmodel_manager2(
+          f_obs               = f_obs,
+          r_free_flags        = flags,
+          abcd                = None,
+          xray_structure      = fmodel.xray_structure.deep_copy_scatterers(),
+          twin_law            = twin_law,
+          ignore_r_free_flags = False,
+          mask_params         = None,
+          sf_accuracy_params  = None)
+        fm.update_all_scales(log = null_out())
+        return (fm.r_work(), fm.r_free(),
+          getattr(fm, "twin_fraction", None) if twin_law else None)
+      r_none = r_factors(None)
+      rows = []
+      for law, h_alpha, britton_alpha in suspicious:
+        rows.append((law, h_alpha, britton_alpha) + r_factors(law))
+    except Exception as e:
+      print("Twinning check not done: %s" % str(e), file=log)
+      return
+    confirmed = [r for r in rows if (r[5] is not None and
+      r[5] > p.min_twin_fraction and r[4] <= r_none[1] - p.min_r_free_decrease)]
+    self.twinning = group_args(
+      abnormal_intensity_statistics = abnormal,
+      l_mean    = summary.l_mean,
+      r_no_twin = r_none,
+      twin_laws = rows,
+      confirmed = (len(confirmed) > 0))
+    fmt = lambda x: "  -  " if x is None else "%5.3f" % x
+    width = max([10] + [len(r[0]) for r in rows])
+    def show():
+      print("  %-*s %7s %7s %8s %7s %7s" % (width, "twin law", "H-test",
+        "Britton", "refined", "r_work", "r_free"), file=log)
+      print("  %-*s %7s %7s %8s %7.4f %7.4f" % (width, "none", "", "", "",
+        r_none[0], r_none[1]), file=log)
+      for law, h_alpha, britton_alpha, r_work, r_free, fraction in rows:
+        print("  %-*s %7s %7s %8s %7.4f %7.4f" % (width, law, fmt(h_alpha),
+          fmt(britton_alpha), fmt(fraction), r_work, r_free), file=log)
+    stats = "intensity statistics %s (<|L|>=%.3f)" % (
+      ["normal", "abnormal"][int(abnormal)], summary.l_mean)
+    if (not self.twinning.confirmed):
+      print("Twinning check: %s;\nR-factors of the starting model with "
+        "the possible twin laws (twin fractions:\nestimated by Xtriage and "
+        "refined):" % stats, file=log)
+      show()
+      print("  No twin law lowers R-free by %g or more." %
+        p.min_r_free_decrease, file=log)
+      return
+    print("\n" + "*" * 79, file=log)
+    print("WARNING: the data are probably twinned\n(%s).\nR-factors of the "
+      "starting model without and with the twin laws (least-squares\ntwin "
+      "target; twin fractions: estimated by Xtriage and refined):" % stats,
+      file=log)
+    show()
+    print("quickref does not refine against twinned data: the refinement "
+      "below ignores\nthe twin law(s).", file=log)
+    print("*" * 79, file=log)
 
   def _setup_anomalous(self, model, fmodel):
     """Anomalous data: report, and optionally set f' and f'' of the atoms
@@ -1651,4 +1771,5 @@ Usage examples:
       model           = self.model,
       fmodel          = self.fmodel,
       model_file_name = self.model_file_name,
-      mtz_file_name   = self.mtz_file_name)
+      mtz_file_name   = self.mtz_file_name,
+      twinning        = self.twinning)
