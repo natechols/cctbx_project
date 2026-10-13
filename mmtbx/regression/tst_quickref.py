@@ -365,6 +365,50 @@ def exercise_reference_coordinate_restraints():
   # tight restraints keep the model close to the start
   assert rmsd["tight"] < 0.5 * rmsd["none"], rmsd
 
+def exercise_unrestrained():
+  import io
+  # a ligand without restraint definitions: its coordinates are fixed
+  # (with a warning), the rest of the model is refined
+  ligand = """\
+HETATM   68  C1  ZQX B   1      27.700  39.700  25.500  1.00 20.00           C
+HETATM   69  C2  ZQX B   1      28.900  39.700  26.300  1.00 20.00           C
+HETATM   70  O1  ZQX B   1      26.500  39.700  26.300  1.00 20.00           O
+"""
+  lines = [l for l in pdb_str.splitlines() if not l.startswith("END")]
+  pdb_inp = iotbx.pdb.input(source_info=None,
+    lines="\n".join(lines) + "\n" + ligand)
+  xrs = pdb_inp.xray_structure_simple()
+  f_obs = abs(xrs.structure_factors(d_min=2.0, algorithm="direct").f_calc())
+  flags = f_obs.generate_r_free_flags(fraction=0.1)
+  mtz = f_obs.as_mtz_dataset(column_root_label="F")
+  mtz.add_miller_array(flags, column_root_label="R-free-flags")
+  data_file = "tst_quickref_unk_data.mtz"
+  mtz.mtz_object().write(data_file)
+  hierarchy = pdb_inp.construct_hierarchy()
+  xrs.shake_sites_in_place(rms_difference=0.3)
+  xrs.set_b_iso(value=20)
+  hierarchy.adopt_xray_structure(xrs)
+  model_file = "tst_quickref_unk_start.pdb"
+  with open(model_file, "w") as f:
+    f.write(hierarchy.as_pdb_string(crystal_symmetry=xrs.crystal_symmetry()))
+  ligand_start = xrs.sites_cart()[-3:]
+  for extra_args in [[], ["add_hydrogens=False"]]:
+    log = io.StringIO()
+    r = run_program(program_class=quickref.Program, args=[model_file,
+      data_file, "output.prefix=tst_quickref_unk", "output.overwrite=True",
+      "write_map_coefficients=False"] + extra_args, logger=log)
+    assert "WARNING: 3 atoms have no geometry restraints" in log.getvalue()
+    assert "ZQX B 1 (3 of 3 atoms)" in log.getvalue()
+    assert r.r_work < 0.7 * r.r_work_start, (extra_args, r.r_work_start,
+      r.r_work)
+    sel = r.model.selection("resname ZQX")
+    assert sel.count(True) == 3
+    assert approx_equal(r.model.get_sites_cart().select(sel), ligand_start,
+      eps=1.e-3)
+    # (the other atoms move)
+    assert r.model.get_sites_cart().select(~sel & ~r.model.get_hd_selection(
+      )).rms_difference(xrs.sites_cart()[:-3]) > 0.05
+
 def exercise_input_tls():
   """TLS records in the input model, with residual B-factors"""
   import io, re
@@ -680,6 +724,7 @@ def run():
   exercise_reference_coordinate_restraints()
   exercise_groups()
   exercise_input_tls()
+  exercise_unrestrained()
   print("OK")
 
 if (__name__ == "__main__"):

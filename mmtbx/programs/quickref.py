@@ -418,6 +418,9 @@ Usage examples:
       scattering_table = self.params.scattering_table,
       model_filename   = model_name)
     model.set_log(null_out()) # restraints processing is verbose
+    # residues without restraint definitions do not stop the refinement:
+    # their coordinates are fixed (see _setup_fixed_sites)
+    model.set_stop_for_unknowns(False)
     if (self.params.add_hydrogens):
       # the restraints are made after the hydrogens are placed; only the
       # flips of symmetric side chains done by processing are needed before
@@ -433,6 +436,7 @@ Usage examples:
         " (%d hydrogens without riding parameterization are fixed)" % (
         n_h - n_riding)), file=log)
       self._riding_h_adps_from_parents(model)
+    self._setup_fixed_sites(model)
     self._setup_anomalous(model, fmodel)
     model.set_log(log)
     self.model = model
@@ -520,6 +524,10 @@ Usage examples:
     fmodel.update_all_scales(remove_outliers = False)
     print("Final: r_work=%.4f r_free=%.4f" % (fmodel.r_work(),
       fmodel.r_free()), file=log)
+    if (self.fixed_sites_selection is not None):
+      print("WARNING: the coordinates of %d atoms without geometry restraints "
+        "were fixed\n(see the warning at the start)." %
+        self.fixed_sites_selection.count(True), file=log)
     self.r_work = fmodel.r_work()
     self.r_free = fmodel.r_free()
     self._write_output()
@@ -602,7 +610,11 @@ Usage examples:
     xrs_trial = xrs_start.deep_copy_scatterers()
     if (pw.trial_shake_sites > 0 or pw.trial_shake_adp > 0):
       if (pw.trial_shake_sites > 0):
-        xrs_trial.shake_sites_in_place(rms_difference = pw.trial_shake_sites)
+        selection = None
+        if (self.fixed_sites_selection is not None):
+          selection = ~self.fixed_sites_selection
+        xrs_trial.shake_sites_in_place(rms_difference = pw.trial_shake_sites,
+          selection = selection)
       if (pw.trial_shake_adp > 0):
         xrs_trial.shake_adp(spread = pw.trial_shake_adp,
           keep_anisotropic = True)
@@ -825,6 +837,41 @@ Usage examples:
     if (set_model):
       model.set_xray_structure(xrs)
 
+  def _setup_fixed_sites(self, model):
+    """Atoms without geometry restraints (residues or atoms without restraint
+    definitions: unknown nonbonded energy types) are not moved by the
+    refinement, and a warning lists them. Their ADPs and occupancies are
+    refined. self.fixed_sites_selection is None if all atoms have
+    restraints."""
+    self.fixed_sites_selection = None
+    unrestrained = (model._type_energies == "")
+    if (unrestrained.count(True) == 0): return
+    self.fixed_sites_selection = unrestrained
+    residues = []
+    for rg in model.get_hierarchy().residue_groups():
+      for ag in rg.atom_groups():
+        n = unrestrained.select(ag.atoms().extract_i_seq()).count(True)
+        if (n > 0):
+          altloc = "" if ag.altloc == "" else " altloc %s" % ag.altloc
+          residues.append("%s %s %s%s (%d of %d atoms)" % (ag.resname,
+            rg.parent().id.strip(), rg.resid().strip(), altloc, n,
+            ag.atoms_size()))
+    log = self.logger
+    print("\n" + "*" * 79, file=log)
+    print("WARNING: %d atoms have no geometry restraints (no restraint "
+      "definitions\nfor these residues or atoms). Their coordinates are "
+      "FIXED during refinement\n(their ADPs and occupancies are refined):" %
+      unrestrained.count(True), file=log)
+    for r in residues:
+      print("  " + r, file=log)
+    if (self.params.rigid_body.enabled):
+      print("(In rigid-body refinement they move with their rigid-body "
+        "groups.)", file=log)
+    print("To refine these atoms, supply restraint definitions (CIF files, "
+      "e.g. from\nphenix.elbow or the Grade server) as additional input "
+      "files.", file=log)
+    print("*" * 79, file=log)
+
   def _add_hydrogens(self, model):
     """Riding hydrogens (B of the parent atoms) with reduce_hydrogen."""
     from mmtbx.hydrogens import reduce_hydrogen
@@ -843,6 +890,7 @@ Usage examples:
     if (result is None):
       raise Sorry("Hydrogens could not be added: %s" % str(error))
     result.set_log(null_out())
+    result.set_stop_for_unknowns(False)
     result.process(make_restraints = True)
     print("Hydrogens added: %d" % (
       result.get_hd_selection().count(True) - n_before), file=self.logger)
@@ -1317,14 +1365,20 @@ Usage examples:
     xray.set_scatterer_grad_flags(
       scatterers = xrs.scatterers(), site = refine_sites, u_iso = refine_adp,
       u_aniso = refine_aniso)
+    scatterers = xrs.scatterers()
     if (self.tls_selection_bool is not None):
-      scatterers = xrs.scatterers()
       for i_seq in self.tls_selection_bool.iselection():
         scatterers[i_seq].flags.set_grad_u_aniso(False)
+    sites_individual = flex.bool(n, refine_sites)
+    if (refine_sites and self.fixed_sites_selection is not None):
+      # atoms without geometry restraints
+      for i_seq in self.fixed_sites_selection.iselection():
+        scatterers[i_seq].flags.set_grad_site(False)
+      sites_individual = ~self.fixed_sites_selection
     model.set_refinement_flags(mmtbx.refinement.refinement_flags.manager(
       individual_sites     = refine_sites,
       individual_adp       = refine_adp,
-      sites_individual     = flex.bool(n, refine_sites),
+      sites_individual     = sites_individual,
       adp_individual_iso   = (xrs.use_u_iso() if refine_iso else None),
       adp_individual_aniso = (aniso if refine_aniso else None)))
 
