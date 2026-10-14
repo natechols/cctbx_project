@@ -209,6 +209,7 @@ def run():
   assert flex.max(restraints_part) > 0
   exercise_simultaneous(f_obs, flags)
   exercise_smooth_target(f_obs, flags)
+  exercise_truncated_gradients(f_obs, flags)
   exercise_aniso_gradients()
   print("OK")
 
@@ -324,6 +325,88 @@ def exercise_simultaneous(f_obs, flags):
     b = fmodel.xray_structure.extract_u_iso_or_u_equiv()
     assert flex.max(b) - flex.min(b) > 0
 
+class truncation_probing_lbfgs(minimization.lbfgs):
+  """
+  Checks the gradients of the truncated u_iso parameters at the first
+  evaluation with truncated shifts.
+  """
+  def compute_functional_and_gradients(self, compute_curvatures=False):
+    base = minimization.lbfgs.compute_functional_and_gradients
+    f, g = base(self, compute_curvatures=compute_curvatures)
+    t = self._truncated
+    if (getattr(self, "probe", None) is None and t is not None
+        and t.count(True) > 0):
+      self.probe = group_args(n_truncated = t.count(True),
+        g_truncated = g.select(t), g_other = g.select(~t))
+      # the target is flat along a truncated parameter
+      i = t.iselection()[0]
+      self.x[i] -= adptbx.b_as_u(1)
+      self.probe.f_shifted = base(self)[0]
+      self.probe.f = f
+      self.x[i] += adptbx.b_as_u(1)
+      f, g = base(self, compute_curvatures=compute_curvatures)
+    return f, g
+
+def exercise_truncated_gradients(f_obs, flags):
+  """
+  The ADP shifts are truncated at u_min (B -5) in each minimization: the
+  target does not depend on the truncated parameters, and their gradients
+  are zero. Before, with many ADPs much too large, the line search failed
+  after a few iterations, which also stopped the coordinate refinement.
+  """
+  model0 = get_model()
+  xrs = model0.get_xray_structure()
+  xrs.shake_sites_in_place(rms_difference=0.3)
+  xrs.set_b_iso(value=60)
+  model0.set_xray_structure(xrs)
+  w = weights.weights(wx=1, wx_scale=1, w=1)
+  tw = group_args(xyz_weights_result=w, adp_weights_result=w)
+  results = {}
+  saved = minimization.lbfgs._zero_truncated_gradients
+  try:
+    for zero_gradients in [False, True]:
+      if (zero_gradients):
+        minimization.lbfgs._zero_truncated_gradients = saved
+      else:
+        minimization.lbfgs._zero_truncated_gradients = lambda self: None
+      model = model0.deep_copy()
+      xrs = model.get_xray_structure()
+      xray.set_scatterer_grad_flags(scatterers=xrs.scatterers(), site=True,
+        u_iso=True)
+      model.set_refinement_flags(mmtbx.refinement.refinement_flags.manager(
+        individual_sites=True, individual_adp=True,
+        sites_individual=flex.bool(xrs.scatterers().size(), True),
+        adp_individual_iso=flex.bool(xrs.scatterers().size(), True)))
+      fmodel = mmtbx.f_model.manager(f_obs=f_obs, r_free_flags=flags,
+        xray_structure=xrs, target_name="ml")
+      fmodel.update_all_scales(remove_outliers=False)
+      m = truncation_probing_lbfgs(
+        fmodels=mmtbx.fmodels(fmodel_xray=fmodel),
+        restraints_manager=model.restraints_manager,
+        model=model,
+        target_weights=tw,
+        refine_xyz=True,
+        refine_adp=True,
+        iso_restraints=mmtbx.refinement.adp_refinement.\
+          adp_restraints_master_params.extract().iso,
+        h_params=group_args(refine="riding"),
+        lbfgs_termination_params=scitbx.lbfgs.termination_parameters(
+          max_iterations=50),
+        collect_monitor=False,
+        log=null_out(),
+        use_curvatures=True)
+      results[zero_gradients] = (m.minimizer.iter(), fmodel.r_work())
+      p = m.probe
+      assert p.n_truncated > 0
+      assert approx_equal(p.f_shifted, p.f, eps=1.e-12)
+      assert not p.g_other.all_eq(0)
+      assert p.g_truncated.all_eq(0) == zero_gradients
+  finally:
+    minimization.lbfgs._zero_truncated_gradients = saved
+  (n_old, r_old), (n_new, r_new) = results[False], results[True]
+  assert n_new > n_old, results
+  assert r_new < r_old, results
+
 class probing_lbfgs(minimization.lbfgs):
   """
   Records the state of the restraints during the minimization, and the
@@ -340,7 +423,11 @@ class probing_lbfgs(minimization.lbfgs):
       i_u = self.u_iso_parameter_selection().iselection()[0]
       self.x[i_u] = adptbx.b_as_u(-20)
       self.apply_shifts()
-      self.probe.u_shift = self.x[i_u]
+      # (the first u_iso parameter is that of the first atom)
+      self.probe.u_shift = (self.xray_structure.scatterers()[0].u_iso -
+        self._scatterers_start[0].u_iso)
+      # the truncation does not change the parameters
+      assert self.x[i_u] == adptbx.b_as_u(-20)
       self.x.set_selected(all_, x0)
     return base(self, compute_curvatures=compute_curvatures)
 

@@ -659,13 +659,19 @@ class lbfgs(object):
 
   def apply_shifts(self):
     o = self._occ
-    if(o is None):
+    # the ADP shifts are truncated in a copy: self.x is not changed behind
+    # the minimizer (see _zero_truncated_gradients)
+    if(o is None and self.refine_adp):
+      shifts = self.x.deep_copy()
+    elif(o is None):
       shifts = self.x
     else:
       # per-atom shifts; the occupancies are set from the group parameters
       shifts = flex.double(o.n_full, 0)
       shifts.set_selected(o.other_slots, self.x[:o.n_other])
+    self._truncated = None
     if(self.refine_adp and not self.refine_xyz):
+      self._truncated = (shifts < self.u_min) | (shifts > self.u_max)
       xray.ext.truncate_shifts(
         shifts    = shifts,
         min_value = self.u_min,
@@ -674,14 +680,14 @@ class lbfgs(object):
       # coordinate shifts must not be truncated
       if(getattr(self, "_u_iso_sel", None) is None):
         self._u_iso_sel = self.u_iso_parameter_selection()
+      self._truncated = self._u_iso_sel & (
+        (shifts < self.u_min) | (shifts > self.u_max))
       u_shifts = shifts.select(self._u_iso_sel)
       xray.ext.truncate_shifts(
         shifts    = u_shifts,
         min_value = self.u_min,
         max_value = self.u_max)
       shifts.set_selected(self._u_iso_sel, u_shifts)
-    if(o is not None):
-      self.x.set_selected(o.i_other, shifts.select(o.other_slots))
     if(self.riding_h_manager is not None and self.refine_xyz
        and self._riding is None):
       # temporary array with zero shifts for all atoms
@@ -740,6 +746,23 @@ class lbfgs(object):
       return apply_shifts_result.u_iso_refinable_params
     else:
       return None
+
+  def _zero_truncated_gradients(self):
+    """
+    The target does not depend on the ADP parameters whose shifts are
+    truncated (apply_shifts): their gradients are zero. Otherwise the
+    gradients are inconsistent with the target, and the line search fails
+    as soon as shifts are truncated (e.g. if many ADPs are too large, the
+    minimization of all parameters stopped after a few iterations).
+    """
+    t = getattr(self, "_truncated", None)
+    if(t is None or t.count(True) == 0): return
+    o = self._occ
+    if(o is not None):
+      t = t.select(o.other_slots)
+      t.extend(flex.bool(self.g.size() - t.size(), False))
+    assert t.size() == self.g.size()
+    self.g.set_selected(t, 0)
 
   def xray_curvatures(self):
     """
@@ -954,6 +977,7 @@ class lbfgs(object):
     self.compute_target(compute_gradients     = True,
                         u_iso_refinable_params = u_iso_refinable_params,
                         compute_curvatures     = compute_curvatures)
+    self._zero_truncated_gradients()
     if (self.verbose > 1):
       print("xray.minimization line search: f,rms(g):", end=' ')
       print(self.f, math.sqrt(flex.mean_sq(self.g)))

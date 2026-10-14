@@ -819,11 +819,16 @@ def exercise_weight_optimization(model_file, data_file):
     r"r_test=\S+ rmsd\(bonds\)=(\S+) .*\(rmsd\(bonds\) > 1e-05\)", text)
   assert len(trials) == len(re.findall("  wxc_scale=", text)), text
   n_wxu = [i for i, t in enumerate(trials) if t[0] != "0.5"][0]
-  best_wxu = min(trials[:n_wxu], key = lambda t: float(t[2]))[1]
-  best_wxc = min([t for t in trials if t[1] == best_wxu],
-    key = lambda t: float(t[2]))[0]
-  assert "Weight optimization: wxc_scale=%s wxu_scale=%s" % (
-    best_wxc, best_wxu) in text, text
+  # (trials with the same rmsd(bonds) as printed are ties)
+  m = re.search(r"Weight optimization: wxc_scale=(\S+) wxu_scale=(\S+)",
+    text)
+  chosen_wxc, chosen_wxu = m.groups()
+  rmsd_wxu = min(float(t[2]) for t in trials[:n_wxu])
+  assert chosen_wxu in [t[1] for t in trials[:n_wxu]
+    if float(t[2]) == rmsd_wxu], (m.groups(), trials)
+  rmsd_wxc = min(float(t[2]) for t in trials if t[1] == chosen_wxu)
+  assert chosen_wxc in [t[0] for t in trials
+    if t[1] == chosen_wxu and float(t[2]) == rmsd_wxc], (m.groups(), trials)
   # the trials do not change the starting model: with only the default
   # scales, the result is that of the refinement without trials
   r1, text = run(["weights.optimize=True", "weights.wxu_scale_grid=1",
