@@ -48,6 +48,45 @@ def exercise_packing():
   assert g_x[2] == 0 and g_x[5] == 0
   assert c_x[2] == 0 and c_x[5] == 0
 
+def exercise_bounded_parameterization():
+  # one unconstrained group, a pair and a triple constrained to sum to 1
+  table = [[0], [1, 2], [3, 4, 5]]
+  bp = occupancies.bounded_parameterization(table=table,
+    occupancy_min=0.1, occupancy_max=0.9)
+  q0 = flex.double([0.3, 0.2, 0.8, 0.1, 0.4, 0.5])
+  x = bp.parameters(q0)
+  assert approx_equal(bp.occupancies(x), q0)
+  # occupancies at or beyond the bounds are moved inside
+  q = bp.occupancies(bp.parameters(flex.double([0.95, 0, 1, -0.2, 0, 1.2])))
+  assert q.all_gt(0) and q.all_lt(1)
+  assert 0.1 < q[0] < 0.9
+  assert approx_equal(q[1]+q[2], 1) and approx_equal(q[3]+q[4]+q[5], 1)
+  # whatever the parameters, the occupancies are in range
+  for x_rand in [flex.random_double(6)*40-20, flex.double(6, 1.e3),
+                 flex.double(6, -1.e3)]:
+    q = bp.occupancies(x_rand)
+    assert 0.1 <= q[0] <= 0.9
+    assert q.all_ge(0) and q.all_le(1)
+    assert approx_equal(q[1]+q[2], 1) and approx_equal(q[3]+q[4]+q[5], 1)
+  # gradients and Gauss-Newton curvatures vs. finite differences
+  c = flex.double([2.0, 3.0, 5.0, 1.0, 4.0, 7.0])
+  a = flex.double([0.7, 0.9, 0.1, 0.0, 0.6, 0.4])
+  def f(x):
+    return 0.5 * flex.sum(c * (bp.occupancies(x) - a)**2)
+  x = flex.double([0.4, 0.3, -0.5, 1.0, -0.2, 0.1])
+  g_x = bp.gradients(x=x, g=c * (bp.occupancies(x) - a))
+  c_x = bp.curvatures(x=x, c=c)
+  eps = 1.e-5
+  for i in range(x.size()):
+    xp = x.deep_copy(); xp[i] += eps
+    xm = x.deep_copy(); xm[i] -= eps
+    assert approx_equal(g_x[i], (f(xp)-f(xm))/(2*eps), eps=1.e-6)
+    dq = (bp.occupancies(xp) - bp.occupancies(xm)) / (2*eps)
+    assert approx_equal(c_x[i], flex.sum(c * dq**2), eps=1.e-6)
+  # no gradient along the redundant direction of a constrained group
+  assert approx_equal(g_x[1]+g_x[2], 0)
+  assert approx_equal(g_x[3]+g_x[4]+g_x[5], 0)
+
 def alt_conf_pdb_str(occ_a, occ_b, shift=0.7):
   """Residue 3 of pdb_str in two conformations."""
   lines = []
@@ -150,13 +189,13 @@ def exercise_joint_adp_occupancies():
   assert n_other == model.get_xray_structure().scatterers().size()
   m._scatterers_start = m.xray_structure.scatterers().deep_copy()
   x0 = flex.double(n_other, 0)
-  x0.extend(occupancies.pack_unpack(
-    x=flex.double([0.55, 0.45]), table=m._occ.table))
+  x0.extend(m._occ.bounded.parameters(flex.double([0.55, 0.45])))
   x0[3] = 0.01 # some u_iso shift
   m.x = x0.deep_copy()
   f0, g0 = m.compute_functional_and_gradients()
   g0 = g0.deep_copy()
-  assert g0[-1] == 0 # last occupancy of a constrained group
+  # (softmax: no gradient along the redundant direction)
+  assert approx_equal(g0[-1] + g0[-2], 0)
   eps = 1.e-5
   for i in [0, 3, 10, n_other, n_other+1]:
     fs = []
@@ -180,15 +219,13 @@ def exercise_joint_adp_occupancies():
     assert fmodel.r_work() < r_start
     if (use_curvatures):
       assert m.curvatures.size() == m.x.size()
-      # zero only for the last parameter of the constrained group, which
-      # does not affect the target (the preconditioner applies a floor)
-      assert m.curvatures[-1] == 0
-      assert m.curvatures[:-1].all_gt(0)
+      assert m.curvatures.all_gt(0)
 
 def run():
   random.seed(0)
   flex.set_random_seed(0)
   exercise_packing()
+  exercise_bounded_parameterization()
   exercise_refinement()
   exercise_joint_adp_occupancies()
   print("OK")

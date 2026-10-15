@@ -56,9 +56,12 @@ class lbfgs(object):
     occupancy_groups (e.g. from mmtbx.refinement.occupancies.
     occupancy_selections) are refined simultaneously with the coordinates
     and/or ADPs: one occupancy per selection, with the selections of a
-    group constrained to sum to 1 (same parameterization as in
-    mmtbx.refinement.occupancies). The occupancies are limited to
-    [occupancy_min, occupancy_max] at the end.
+    group constrained to sum to 1. The parameters are unbounded (see
+    mmtbx.refinement.occupancies.bounded_parameterization), so that the
+    occupancies stay in range during the minimization: softmax for
+    constrained groups, logistic map onto [occupancy_min, occupancy_max]
+    for single selections. The occupancies are limited to
+    [occupancy_min, occupancy_max] again at the end.
 
     If use_curvatures is True, the minimizer is preconditioned with
     approximate curvatures (diagonal of the 2nd derivative matrix): the
@@ -239,9 +242,9 @@ class lbfgs(object):
   def _setup_occupancy_groups(self):
     """
     Parameters: [coordinates and/or ADPs as packed by the scatterer flags]
-    followed by the packed group occupancies. The per-atom occupancy
-    gradients (for the atoms in the groups) are computed together with the
-    other gradients and summed for each group.
+    followed by the occupancy parameters (bounded_parameterization). The
+    per-atom occupancy gradients (for the atoms in the groups) are computed
+    together with the other gradients and summed for each group.
     """
     from mmtbx.refinement import occupancies
     self._occ = None
@@ -298,10 +301,15 @@ class lbfgs(object):
         sel_bools.append(flex.bool(n_sc, sel))
       table.append(indices)
     n_other = other_slots.count(True)
-    occ_par = occupancies.pack_unpack(x = par, table = table)
+    bounded = occupancies.bounded_parameterization(
+      table         = table,
+      occupancy_min = self.occupancy_min,
+      occupancy_max = self.occupancy_max)
+    occ_par = bounded.parameters(par)
     self._occ = group_args(
       groups      = groups,
       table       = table,
+      bounded     = bounded,
       sel_bools   = sel_bools,
       i_sel       = i_sel,
       occ_slots   = occ_slots,
@@ -604,15 +612,15 @@ class lbfgs(object):
       result.set_selected(r.u_aniso_slots, u_cart.select(r.u_aniso_codes))
     return result
 
-  def _group_occupancies(self):
-    from mmtbx.refinement import occupancies
+  def _occupancy_parameters(self):
     o = self._occ
-    return occupancies.pack_unpack(
-      x = self.x[o.n_other:o.n_other+o.n_occ], table = o.table)
+    return self.x[o.n_other:o.n_other+o.n_occ]
+
+  def _group_occupancies(self):
+    return self._occ.bounded.occupancies(self._occupancy_parameters())
 
   def _to_parameters(self, full, curvatures=False):
     """Per-atom packed gradients or curvatures -> parameters."""
-    from mmtbx.refinement import occupancies
     o = self._occ
     if(self._riding is not None):
       full = self._fold_riding(full, curvatures = curvatures)
@@ -621,9 +629,11 @@ class lbfgs(object):
     group_values = flex.double([flex.sum(per_atom.select(sel_bool))
       for sel_bool in o.sel_bools])
     if(curvatures):
-      packed = occupancies.pack_curvatures(x = group_values, table = o.table)
+      packed = o.bounded.curvatures(
+        x = self._occupancy_parameters(), c = group_values)
     else:
-      packed = occupancies.pack_gradients(x = group_values, table = o.table)
+      packed = o.bounded.gradients(
+        x = self._occupancy_parameters(), g = group_values)
     result = full.select(o.other_slots)
     result.extend(packed)
     if(self._tls is not None):

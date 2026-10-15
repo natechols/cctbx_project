@@ -318,6 +318,103 @@ def pack_curvatures(x, table):
       result[indices[-1]] = 0
   return result
 
+class bounded_parameterization(object):
+  """
+  Group occupancies as smooth functions of unbounded parameters, so that a
+  minimizer cannot leave the feasible range (unlike pack_unpack, where the
+  last occupancy of a constrained group, 1 minus the others, is easily
+  driven negative):
+    - constrained groups (several selections, occupancies summing to 1):
+      softmax, q_i = exp(x_i) / sum_j exp(x_j), so 0 < q_i < 1;
+    - single selections: logistic, q = q_min + (q_max-q_min)/(1+exp(-x)).
+  The parameters of a constrained group are defined up to a common
+  constant; the gradients with respect to that direction are zero.
+  Occupancies at the bounds are moved inside by eps (in the fraction of
+  the range) when converted to parameters, where the map is singular.
+  """
+  def __init__(self, table, occupancy_min=0, occupancy_max=1, eps=1.e-3):
+    adopt_init_args(self, locals())
+    assert occupancy_max > occupancy_min
+
+  def parameters(self, occupancies):
+    import math
+    eps = self.eps
+    result = flex.double(occupancies.size(), 0)
+    lo, hi = self.occupancy_min, self.occupancy_max
+    for indices in self.table:
+      if (len(indices) == 1):
+        i = indices[0]
+        s = min(1-eps, max(eps, (occupancies[i] - lo) / (hi - lo)))
+        result[i] = math.log(s / (1 - s))
+      else:
+        q = [max(eps, occupancies[i]) for i in indices]
+        s = sum(q)
+        for i, q_i in zip(indices, q):
+          result[i] = math.log(q_i / s)
+    return result
+
+  def occupancies(self, x):
+    import math
+    result = flex.double(x.size(), 0)
+    lo, hi = self.occupancy_min, self.occupancy_max
+    for indices in self.table:
+      if (len(indices) == 1):
+        i = indices[0]
+        result[i] = lo + (hi - lo) * _logistic(x[i])
+      else:
+        x_max = max([x[i] for i in indices])
+        e = [math.exp(x[i] - x_max) for i in indices]
+        s = sum(e)
+        for i, e_i in zip(indices, e):
+          result[i] = e_i / s
+    return result
+
+  def gradients(self, x, g):
+    """Gradients with respect to the parameters x, given the gradients g
+    with respect to the group occupancies."""
+    q = self.occupancies(x)
+    result = flex.double(x.size(), 0)
+    hi_lo = self.occupancy_max - self.occupancy_min
+    for indices in self.table:
+      if (len(indices) == 1):
+        i = indices[0]
+        s = _logistic(x[i])
+        result[i] = g[i] * hi_lo * s * (1 - s)
+      else:
+        g_mean = sum([q[i] * g[i] for i in indices])
+        for i in indices:
+          result[i] = q[i] * (g[i] - g_mean)
+    return result
+
+  def curvatures(self, x, c):
+    """
+    Gauss-Newton curvatures with respect to the parameters x, given the
+    curvatures c with respect to the group occupancies (cross terms
+    neglected): sum_j c_j (dq_j/dx_i)**2, with dq_j/dx_i = q_j*(d_ij-q_i)
+    for a constrained group.
+    """
+    q = self.occupancies(x)
+    result = flex.double(x.size(), 0)
+    hi_lo = self.occupancy_max - self.occupancy_min
+    for indices in self.table:
+      if (len(indices) == 1):
+        i = indices[0]
+        s = _logistic(x[i])
+        result[i] = c[i] * (hi_lo * s * (1 - s))**2
+      else:
+        cq2 = sum([c[j] * q[j]**2 for j in indices])
+        for i in indices:
+          q_i = q[i]
+          result[i] = q_i**2 * (c[i] * (1 - 2*q_i) + cq2)
+    return result
+
+def _logistic(x):
+  import math
+  if (x >= 0):
+    return 1 / (1 + math.exp(-x))
+  e = math.exp(x)
+  return e / (1 + e)
+
 #-----------------------------------------------------------------------
 # SELECTION HANDLING
 
