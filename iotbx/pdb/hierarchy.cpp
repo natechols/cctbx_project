@@ -2030,6 +2030,11 @@ namespace {
     resnames.reserve(32U); // not critical
     std::set<std::string> resnames_with_altloc; // allocate once
     std::vector<std::vector<atom_group> > altloc_ags(n_cf); // allocate once
+    // A residue group without atoms in a conformer (e.g. a residue with
+    // altlocs B and C only, in conformer A) is a gap in that conformer:
+    // the next residue of the conformer is not linked to the previous one
+    // (otherwise residues i-1 and i+1 were linked, e.g. by a peptide bond).
+    std::vector<bool> gap_in_conformer(n_cf, false);
     for(unsigned i_rg=0;i_rg<residue_groups_size;i_rg++) {
       residue_group const& rg = residue_groups[i_rg];
       for(unsigned i_cf=0;i_cf<n_cf;i_cf++) {
@@ -2078,6 +2083,15 @@ namespace {
           }
         }
         unsigned n_rn = static_cast<unsigned>(resnames.size());
+        if (n_rn == 0) {
+          if (result[i_cf].data->residues.size() != 0) {
+            gap_in_conformer[i_cf] = true;
+          }
+          continue;
+        }
+        bool link_to_previous = (
+          rg.data->link_to_previous && !gap_in_conformer[i_cf]);
+        gap_in_conformer[i_cf] = false;
         for(unsigned i_rn=0;i_rn<n_rn;i_rn++) {
           std::string const& resname = resnames[i_rn];
           ms3va::const_iterator rai = resname_atoms.find(resname);
@@ -2086,7 +2100,7 @@ namespace {
             resname.c_str(),
             rg.data->resseq.elems,
             rg.data->icode.elems,
-            rg.data->link_to_previous,
+            link_to_previous,
             /* is_pure_main_conf */ (   resnames_with_altloc.find(resname)
                                      == resnames_with_altloc.end()),
             rai->second);

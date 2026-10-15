@@ -3908,6 +3908,35 @@ def conformers_as_str(conformers):
         print("    atom:", show_string(atom.name), file=s)
   return s.getvalue()
 
+def exercise_conformers_gap():
+  # residue 2 only in conformers B and C: in conformer A residues 1 and 3
+  # are not linked (they were linked, e.g. by a peptide bond across the gap)
+  pdb_inp = pdb.input(source_info=None, lines=flex.split_lines("""\
+ATOM      1  N   GLY A   1       1.000   1.000   1.000  1.00 10.00           N
+ATOM      2  CA  GLY A   1       2.000   1.000   1.000  1.00 10.00           C
+ATOM      3  N  AGLY A   2       3.000   1.000   1.000  0.50 10.00           N
+ATOM      4  CA AGLY A   2       4.000   1.000   1.000  0.50 10.00           C
+ATOM      5  N  BGLY A   2       3.000   1.200   1.000  0.50 10.00           N
+ATOM      6  CA BGLY A   2       4.000   1.200   1.000  0.50 10.00           C
+ATOM      7  N  BSER A   3       5.000   1.000   1.000  0.50 10.00           N
+ATOM      8  CA BSER A   3       6.000   1.000   1.000  0.50 10.00           C
+ATOM      9  N  CSER A   3       5.000   1.200   1.000  0.50 10.00           N
+ATOM     10  CA CSER A   3       6.000   1.200   1.000  0.50 10.00           C
+ATOM     11  N   GLY A   4       7.000   1.000   1.000  1.00 10.00           N
+ATOM     12  CA  GLY A   4       8.000   1.000   1.000  1.00 10.00           C
+ATOM     13  N   GLY A   6       9.000   1.000   1.000  1.00 10.00           N
+"""))
+  chain = pdb_inp.construct_hierarchy(sort_atoms=False).only_chain()
+  links = {}
+  for cf in chain.conformers():
+    links[cf.altloc] = [(r.resseq.strip(), r.link_to_previous)
+      for r in cf.residues()]
+  # (gaps in the residue numbers are not breaks here, e.g. residue 6)
+  assert links == {
+    "A": [("1", False), ("2", True), ("4", False), ("6", True)],
+    "B": [("1", False), ("2", True), ("3", True), ("4", True), ("6", True)],
+    "C": [("1", False), ("3", False), ("4", True), ("6", True)]}, links
+
 def exercise_conformers():
   assert len(pdb.hierarchy.chain().conformers()) == 0
   assert len(pdb.hierarchy.residue_group().conformers()) == 0
@@ -7453,6 +7482,7 @@ def exercise(args):
     exercise_find_pure_altloc_ranges()
     exercise_occupancy_groups_simple()
     exercise_conformers()
+    exercise_conformers_gap()
     exercise_residue()
     exercise_is_identical_hierarchy()
     exercise_is_similar_hierarchy()
