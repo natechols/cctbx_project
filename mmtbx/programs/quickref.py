@@ -562,6 +562,10 @@ Usage examples:
     r_work_previous = fmodel.r_work()
     for cycle in range(p.number_of_macro_cycles):
       if (cycle > 0):
+        # bulk-solvent mask of the current model (otherwise the R-factors
+        # of the macro-cycles are optimistic: see the final R-factors)
+        fmodel.update_xray_structure(update_f_calc = True,
+          update_f_mask = True)
         # outliers are rejected only once, at the start
         fmodel.update_all_scales(remove_outliers = False)
         if (model.torsion_NCS_present()):
