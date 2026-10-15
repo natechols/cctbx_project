@@ -242,6 +242,7 @@ general_tests = [
   "$D/conformation_dependent_library/tst_cis_c_n_ca.py",
   "$D/conformation_dependent_library/cdl_svl_database.py",
   "$D/conformation_dependent_library/tst_pH_mechanism.py",
+  "$D/conformation_dependent_library/tst_pH_altlocs.py",
   "$D/conformation_dependent_library/tst_mcl_01.py",
   "$D/conformation_dependent_library/tst_mcl_02.py",
   "$D/conformation_dependent_library/tst_mcl_03.py",

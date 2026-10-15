@@ -62,10 +62,18 @@ def _get_atom_neutron(ag, name, bondlength=None):
     if atom: return atom, name, True
   return atom, None, False
 
+def _compatible_atom_groups(ag1, ag2):
+  """Atom groups of the same conformer: the same altloc, or one of them
+  without altloc (otherwise atoms of different conformers were bonded,
+  e.g. PDB 4PSS, FOL in conformers A and B)."""
+  a1, a2 = ag1.altloc.strip(), ag2.altloc.strip()
+  return a1 == a2 or a1 == '' or a2 == ''
+
 def _generate_bond_atoms(rg, lookup_name1, lookup_name2, bondlength=None, verbose=False):
   for i, ag1 in enumerate(rg.atom_groups()):
     for j, ag2 in enumerate(rg.atom_groups()):
       if j>i: break
+      if not _compatible_atom_groups(ag1, ag2): continue
       atom1, name1, neutron1 = _get_atom_neutron(ag1,
                                                  lookup_name1,
                                                  bondlength=bondlength)
@@ -82,6 +90,7 @@ def _generate_angle_atoms(rg, lookup_name1, lookup_name2, lookup_name3, verbose=
   for i, ag1 in enumerate(rg.atom_groups()):
     for j, ag2 in enumerate(rg.atom_groups()):
       if j>i: break
+      if not _compatible_atom_groups(ag1, ag2): continue
       atom1, name1, neutron1 = _get_atom_neutron(ag1,
                                                  lookup_name1,
                                                  bondlength=.5)
@@ -105,6 +114,7 @@ def _generate_dihedral_atoms(rg, lookup_name1, lookup_name2, lookup_name3, looku
   for i, ag1 in enumerate(rg.atom_groups()):
     for j, ag2 in enumerate(rg.atom_groups()):
       # if j>i: break
+      if not _compatible_atom_groups(ag1, ag2): continue
       atom1, name1, neutron1 = _get_atom_neutron(ag1,
                                                  lookup_name1,
                                                  bondlength=.5)
