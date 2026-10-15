@@ -32,6 +32,14 @@ _refine.ls_R_factor_R_free                     0.2238
   assert approx_equal(constants.b_cart, (2.7593, 2.7593, -5.5186, 0, 0, 0,))
   assert approx_equal(constants.r_work, 0.1690)
   assert approx_equal(constants.r_free, 0.2238)
+  # incomplete tensor (PDB 4TLI): absent
+  partial = cif_input.replace("_refine.aniso_B[1][1]                          2.7593",
+    "_refine.aniso_B[1][1]                          ?")
+  assert partial != cif_input
+  cif_block = iotbx.cif.reader(input_string=partial).model()["test"]
+  constants = mmcif.extract_f_model_core_constants(cif_block)
+  assert constants.b_cart == [None]*6
+  assert approx_equal(constants.k_sol, 0.3340)
 
 def exercise_get_r_rfree_sigma_r_work_fallback():
   def _r_work_from(cif_input):

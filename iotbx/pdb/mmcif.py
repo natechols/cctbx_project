@@ -694,7 +694,10 @@ def extract_f_model_core_constants(cif_block):
   b_sol = _float_or_None(cif_block.get('_refine.solvent_model_param_bsol'))
   b_cart = [_float_or_None(cif_block.get('_refine.aniso_B[%s][%s]' %(i, j)))
             for i, j in ('11', '22', '33', '12', '13', '23')]
-  assert b_cart.count(None) in (0, 6)
+  # an incomplete tensor (e.g. PDB 4TLI: five components '?') is absent, as
+  # in remark_3_interpretation.extract_f_model_core_constants
+  if (b_cart.count(None) != 0):
+    b_cart = [None]*6
   r_solv = _float_or_None(cif_block.get('_refine.pdbx_solvent_vdw_probe_radii'))
   r_shrink = _float_or_None(cif_block.get('_refine.pdbx_solvent_shrinkage_radii'))
   r_work = _float_or_None(cif_block.get('_refine.ls_R_factor_R_work'))
