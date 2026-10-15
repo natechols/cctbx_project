@@ -51,7 +51,8 @@ class lbfgs(object):
                      smooth_target            = False,
                      riding_h                 = False,
                      tls_groups               = None,
-                     tls_refine_trace_t       = False):
+                     tls_refine_trace_t       = False,
+                     equal_pairs              = None):
     """
     occupancy_groups (e.g. from mmtbx.refinement.occupancies.
     occupancy_selections) are refined simultaneously with the coordinates
@@ -115,6 +116,14 @@ class lbfgs(object):
     of the group, so the diagonal of T is refined in a traceless basis (2
     parameters), with T12, T13, T23, L and S: 20 parameters per group.
     The refined TLS parameters are in self.tls_result (list of tlso).
+
+    equal_pairs (group_args with i_seqs, j_seqs, sigma_site, sigma_b)
+    restrains pairs of atoms to the same position and u_iso (e.g. copies of
+    a residue that are identical in several states of an ensemble):
+    sum(|x_i-x_j|**2)/sigma_site**2 is added to the geometry target, and
+    sum((B_i-B_j)**2)/sigma_b**2 to the ADP restraints target, with the
+    same weights and normalization (u_iso only for atoms with isotropic
+    ADPs).
     """
     timer = user_plus_sys_time()
     adopt_init_args(self, locals())
@@ -895,6 +904,12 @@ class lbfgs(object):
           scatterers     = self.xray_structure.scatterers(),
           xray_gradients = self.curvatures,
           site_gradients = scc*self.weights.w)
+      if(self.equal_pairs is not None):
+        self._add_equal_pairs_sites(
+          scale              = self.weights.w * geometry_scale *
+            self._energies_normalization(self.stereochemistry_residuals),
+          compute_gradients  = compute_gradients,
+          compute_curvatures = compute_curvatures)
     if(self.refine_adp and self.restraints_manager is not None and
        self.restraints_manager.geometry is not None
        and self.adp_restraints_weight > 0.0
@@ -912,6 +927,12 @@ class lbfgs(object):
         compute_curvatures = compute_curvatures)
       adp_scale = self._normalization_scale("adp", energies_adp)
       self.f += energies_adp.target * self.adp_restraints_weight * adp_scale
+      if(self.equal_pairs is not None):
+        self._add_equal_pairs_u_iso(
+          scale              = self.adp_restraints_weight * adp_scale *
+            self._energies_normalization(energies_adp),
+          compute_gradients  = compute_gradients,
+          compute_curvatures = compute_curvatures)
       if(compute_curvatures):
         w_a = self.adp_restraints_weight * adp_scale
         u_iso_curvatures = energies_adp.u_iso_curvatures
@@ -964,6 +985,67 @@ class lbfgs(object):
       if(compute_curvatures):
         self.curvatures = self._to_parameters(self.curvatures,
           curvatures = True)
+
+  def _energies_normalization(self, energies):
+    factor = getattr(energies, "normalization_factor", None)
+    if(factor is None or factor == 0): return 1.0
+    return factor
+
+  def _add_equal_pairs_sites(self, scale, compute_gradients,
+                             compute_curvatures):
+    ep = self.equal_pairs
+    sites = self.xray_structure.sites_cart()
+    d = sites.select(ep.i_seqs) - sites.select(ep.j_seqs)
+    k = scale / ep.sigma_site**2
+    self.f += k * flex.sum(d.dot())
+    n_sc = sites.size()
+    if(compute_gradients):
+      g = flex.vec3_double(n_sc, (0,0,0))
+      g.add_selected(ep.i_seqs, d * (2*k))
+      g.add_selected(ep.j_seqs, d * (-2*k))
+      xray.minimization.add_gradients(
+        scatterers     = self.xray_structure.scatterers(),
+        xray_gradients = self.g,
+        site_gradients = g)
+    if(compute_curvatures):
+      c = flex.vec3_double(n_sc, (0,0,0))
+      c2 = flex.vec3_double(ep.i_seqs.size(), (2*k, 2*k, 2*k))
+      c.add_selected(ep.i_seqs, c2)
+      c.add_selected(ep.j_seqs, c2)
+      xray.minimization.add_gradients(
+        scatterers     = self.xray_structure.scatterers(),
+        xray_gradients = self.curvatures,
+        site_gradients = c)
+
+  def _add_equal_pairs_u_iso(self, scale, compute_gradients,
+                             compute_curvatures):
+    ep = self.equal_pairs
+    xrs = self.xray_structure
+    iso = xrs.use_u_iso() & ~xrs.use_u_aniso()
+    sel = iso.select(ep.i_seqs) & iso.select(ep.j_seqs)
+    if(sel.count(True) == 0): return
+    i_seqs, j_seqs = ep.i_seqs.select(sel), ep.j_seqs.select(sel)
+    u = xrs.extract_u_iso_or_u_equiv()
+    d = u.select(i_seqs) - u.select(j_seqs)
+    k = scale * (adptbx.u_as_b(1) / ep.sigma_b)**2
+    self.f += k * flex.sum(d * d)
+    n_sc = u.size()
+    if(compute_gradients):
+      g = flex.double(n_sc, 0)
+      g.add_selected(i_seqs, d * (2*k))
+      g.add_selected(j_seqs, d * (-2*k))
+      xray.minimization.add_gradients(
+        scatterers      = xrs.scatterers(),
+        xray_gradients  = self.g,
+        u_iso_gradients = g)
+    if(compute_curvatures):
+      c = flex.double(n_sc, 0)
+      c.add_selected(i_seqs, flex.double(i_seqs.size(), 2*k))
+      c.add_selected(j_seqs, flex.double(i_seqs.size(), 2*k))
+      xray.minimization.add_gradients(
+        scatterers      = xrs.scatterers(),
+        xray_gradients  = self.curvatures,
+        u_iso_gradients = c)
 
   def _normalization_scale(self, key, energies):
     """

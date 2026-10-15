@@ -462,6 +462,122 @@ def extract_partial_occupancy_selections(hierarchy):
             result.append([i_seqs])
   return result
 
+def ensemble_states(hierarchy, min_altlocs=3, min_complete_residues=10,
+                    tolerance=0.01):
+  """
+  Detects multi-state ensembles, in which each altloc is a state of the
+  whole crystal rather than a local alternative conformation, e.g. PanDDA
+  ensembles (giant.merge_conformations): ground state A, B and bound state
+  C, D in many residues, the ligand only in C, D. Then the occupancy of an
+  altloc is the same everywhere, the occupancies of the altlocs sum to 1,
+  and residues present only in some states (the ligand, or waters of the
+  ground state) do not have occupancies summing to 1.
+
+  Returns None, or group_args with the altlocs, their (common)
+  occupancies, and one flex.size_t selection per altloc (all atoms with
+  that altloc). The conditions are conservative, so that models with
+  ordinary alternative conformations (e.g. A and B at 0.5 everywhere) are
+  not affected:
+    - at least min_altlocs altlocs;
+    - the occupancies of each altloc are equal within tolerance;
+    - the occupancies of the altlocs sum to 1 within 2*tolerance;
+    - at least min_complete_residues residues have all altlocs;
+    - at least one residue other than water is present in some but not
+      all states.
+  """
+  from libtbx import group_args
+  i_seqs = {}
+  occ = {}
+  n_complete = 0
+  residue_altlocs = []
+  for rg in hierarchy.residue_groups():
+    altlocs = set()
+    for ag in rg.atom_groups():
+      if (ag.altloc in ["", " "]): continue
+      altlocs.add(ag.altloc)
+      atoms = ag.atoms()
+      i_seqs.setdefault(ag.altloc, flex.size_t()).extend(atoms.extract_i_seq())
+      occ.setdefault(ag.altloc, flex.double()).extend(atoms.extract_occ())
+    if (len(altlocs) > 0):
+      residue_altlocs.append(
+        (altlocs, rg.atom_groups()[0].resname.strip() in ["HOH", "WAT", "DOD"]))
+  altlocs = sorted(occ.keys())
+  if (len(altlocs) < min_altlocs): return None
+  for altloc in altlocs:
+    o = occ[altloc]
+    if (flex.max(o) - flex.min(o) > tolerance): return None
+  occupancies = [flex.mean(occ[altloc]) for altloc in altlocs]
+  if (abs(sum(occupancies) - 1) > 2*tolerance): return None
+  n_complete = len([a for a, w in residue_altlocs if len(a) == len(altlocs)])
+  if (n_complete < min_complete_residues): return None
+  n_partial = len([a for a, w in residue_altlocs
+    if (not w and len(a) < len(altlocs))])
+  if (n_partial == 0): return None
+  return group_args(
+    altlocs     = altlocs,
+    occupancies = occupancies,
+    selections  = [i_seqs[altloc] for altloc in altlocs],
+    n_complete  = n_complete,
+    n_partial   = n_partial)
+
+def ensemble_occupancy_groups(groups, states, n_atoms):
+  """
+  Occupancy groups for a multi-state ensemble (see ensemble_states): one
+  group with one occupancy per state (altloc), shared by all atoms with
+  that altloc and constrained to sum to 1, plus the groups of
+  occupancy_selections without atoms in alternative conformations.
+  """
+  in_states = flex.bool(n_atoms, False)
+  for sel in states.selections:
+    in_states.set_selected(sel, True)
+  result = []
+  for group in (groups or []):
+    if (any([in_states.select(sel).count(True) > 0 for sel in group])):
+      continue
+    result.append(group)
+  result.append([sel.deep_copy() for sel in states.selections])
+  return result
+
+def identical_conformer_pairs(hierarchy, altlocs, tolerance=0.05):
+  """
+  Pairs of atoms (i_seqs, j_seqs) in conformers of the same residue that are
+  identical within tolerance (largest distance between atoms of the same
+  name, hydrogens excluded): each conformer is paired with the first
+  identical conformer (altlocs in the given order), e.g. in ensembles where
+  most residues have copies of the ground state conformers in the bound
+  state. Returns group_args(i_seqs, j_seqs, n_residues, n_conformers).
+  """
+  from libtbx import group_args
+  i_seqs, j_seqs = flex.size_t(), flex.size_t()
+  n_residues = 0
+  n_conformers = 0
+  for rg in hierarchy.residue_groups():
+    conformers = []
+    for ag in rg.atom_groups():
+      if (not ag.altloc in altlocs): continue
+      atoms = dict([(a.name, a) for a in ag.atoms()
+        if not a.element.strip().upper() in ["H", "D"]])
+      conformers.append((altlocs.index(ag.altloc), atoms))
+    conformers.sort(key=lambda c: c[0])
+    representatives = []
+    found = False
+    for k, atoms in conformers:
+      for rep in representatives:
+        if (set(rep.keys()) != set(atoms.keys())): continue
+        if (max([rep[n].distance(atoms[n]) for n in atoms]) > tolerance):
+          continue
+        for n in sorted(atoms.keys()):
+          i_seqs.append(rep[n].i_seq)
+          j_seqs.append(atoms[n].i_seq)
+        n_conformers += 1
+        found = True
+        break
+      else:
+        representatives.append(atoms)
+    if (found): n_residues += 1
+  return group_args(i_seqs = i_seqs, j_seqs = j_seqs,
+    n_residues = n_residues, n_conformers = n_conformers)
+
 def occupancy_selections_wrapper(
       model,
       add_water                          = False,
