@@ -158,10 +158,59 @@ def exercise_many_chains_many_operators():
     h2.overall_counts().n_chains, n_expected)
   assert [c.id for c in h2.only_model().chains()] == ids
 
+def exercise_mtrix_without_identity():
+  """
+  The identity need not be listed (PDB 2CBR: one MTRIX record, 'generate',
+  in both the PDB and the mmCIF file); the coordinates in the file are one of
+  the copies and must be kept.
+  """
+  lines = [l for l in pdb_lines.splitlines() if not (l.startswith("MTRIX")
+    or l.startswith("REMARK 350"))]
+  lines.insert(2, """\
+MTRIX1   2  0.309017 -0.951057  0.000000      239.91182
+MTRIX2   2  0.951057  0.309017  0.000000      -37.99830
+MTRIX3   2  0.000000  0.000000  1.000000        0.00000""")
+  inp = iotbx.pdb.input(lines="\n".join(lines), source_info=None)
+  xyz = inp.atoms().extract_xyz()
+  model = mmtbx.model.manager(model_input = inp)
+  h = model.get_hierarchy()
+  assert model.get_number_of_atoms() == 80, model.get_number_of_atoms()
+  assert [c.id for c in h.only_model().chains()] == ["A", "B"]
+  assert h.only_model().chains()[0].atoms().extract_xyz().max_distance(
+    xyz) < 1e-6
+  # the same in mmCIF (_struct_ncs_oper)
+  model = mmtbx.model.manager(model_input = iotbx.pdb.input(
+    lines="\n".join(lines), source_info=None), expand_with_mtrix = False)
+  cif = model.model_as_mmcif() + """\
+loop_
+_struct_ncs_oper.id
+_struct_ncs_oper.code
+_struct_ncs_oper.matrix[1][1]
+_struct_ncs_oper.matrix[1][2]
+_struct_ncs_oper.matrix[1][3]
+_struct_ncs_oper.matrix[2][1]
+_struct_ncs_oper.matrix[2][2]
+_struct_ncs_oper.matrix[2][3]
+_struct_ncs_oper.matrix[3][1]
+_struct_ncs_oper.matrix[3][2]
+_struct_ncs_oper.matrix[3][3]
+_struct_ncs_oper.vector[1]
+_struct_ncs_oper.vector[2]
+_struct_ncs_oper.vector[3]
+1 generate 0.309017 -0.951057 0.000000 0.951057 0.309017 0.000000 0.000000 0.000000 1.000000 239.91182 -37.99830 0.00000
+"""
+  inp = iotbx.pdb.input(lines=cif, source_info=None)
+  model = mmtbx.model.manager(model_input = inp)
+  h = model.get_hierarchy()
+  assert model.get_number_of_atoms() == 80, model.get_number_of_atoms()
+  assert h.only_model().chains()[0].atoms().extract_xyz().max_distance(
+    xyz) < 1e-6
+
 if (__name__ == "__main__"):
   t0 = time.time()
   exercise_biomt_only()
   exercise_mtrix_only()
   exercise_many_chains_many_operators()
+  exercise_mtrix_without_identity()
   print("Total time: %8.3f"%(time.time() - t0))
   print("OK.")

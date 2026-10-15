@@ -5318,7 +5318,15 @@ class manager(object):
       return
     if(self.get_hierarchy() is None and self.get_model_input() is not None):
       self._pdb_hierarchy = deepcopy(self._model_input).construct_hierarchy()
-    self._expand_symm_helper(self.mtrix_operators)
+    operators = self.mtrix_operators
+    if(not [1 for r, t in zip(operators.r, operators.t)
+            if r.is_r3_identity_matrix() and t.is_col_zero()]):
+      # The identity need not be listed (e.g. PDB 2CBR: one MTRIX record,
+      # 'generate'); the coordinates in the file are always one of the copies.
+      operators = group_args(
+        r = [matrix.sqr((1,0,0,0,1,0,0,0,1))] + list(operators.r),
+        t = [matrix.col((0,0,0))] + list(operators.t))
+    self._expand_symm_helper(operators)
     self._mtrix_expanded = True
 
   def expand_with_BIOMT_records(self):
