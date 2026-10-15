@@ -1316,6 +1316,27 @@ x,y,z
     assert str(e).splitlines() == expected.splitlines()
   assert exception_happened
 
+def exercise_incomplete_symmetry_operators():
+  # PDB 9XPL: 'C 1 2 1' with only x,y,z in _space_group_symop: the list of
+  # operators is incomplete, the space group symbol is used
+  cif_str = """\
+data_test
+_cell.length_a                     99.460
+_cell.length_b                     106.900
+_cell.length_c                     101.670
+_cell.angle_alpha                  90.00
+_cell.angle_beta                   91.91
+_cell.angle_gamma                  90.00
+_symmetry.Int_Tables_number                5
+_symmetry.space_group_name_H-M             'C 1 2 1'
+_space_group_symop.id              1
+_space_group_symop.operation_xyz   x,y,z
+"""
+  cif_model = cif.reader(input_string=cif_str).model()
+  cs = cif.builders.crystal_symmetry_builder(
+    cif_block=cif_model["test"]).crystal_symmetry
+  assert str(cs.space_group_info()) == "C 1 2 1"
+
 def exercise_miller_indices_as_cif_loop():
   indices = flex.miller_index(((1, -2, 3), (-4, 5, -6), (0, 0, 0)))
   loop = cif.miller_indices_as_cif_loop(indices)
@@ -1338,6 +1359,7 @@ def exercise_miller_indices_as_cif_loop():
 
 def exercise():
   exercise_inconsistent_symmetry()
+  exercise_incomplete_symmetry_operators()
   exercise_missing_atom_site_type_symbol()
   exercise_syntax_errors()
   exercise_detect_binary()

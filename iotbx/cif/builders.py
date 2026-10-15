@@ -172,9 +172,26 @@ class crystal_symmetry_builder(builder_base):
       except Exception: pass
     if hm_symbol not in (None, '?'):
       try: space_group_from_other = sgtbx.space_group_info(symbol=hm_symbol).group()
-      except Exception: pass
+      except Exception:
+        # non-standard symbols of PDB entries, e.g. 'I 1 21 1' (PDB 1M6C),
+        # as in CRYST1 records
+        try:
+          from iotbx.pdb import cryst1_interpretation
+          sgi = cryst1_interpretation.categorize(hm_symbol).space_group_info(
+            unit_cell=None)
+          if sgi is not None:
+            space_group_from_other = sgi.group()
+        except Exception: pass
     # Check consistency.
     # Use space group equivalence operation in cctbx.sgtbx.space_group
+
+    # A list of operators with only x,y,z and a space group symbol or number
+    # (e.g. PDB 9XPL: 'C 1 2 1' and _space_group_symop x,y,z only) is an
+    # incomplete list: the space group from the symbol is used.
+    if (space_group_from_other is not None and
+        space_group_from_ops is not None and
+        space_group_from_ops.order_z() == 1):
+      space_group_from_ops = None
 
     if (space_group_from_other is not None) and (
        space_group_from_ops is not None) and (not

@@ -41,6 +41,47 @@ _refine.ls_R_factor_R_free                     0.2238
   assert constants.b_cart == [None]*6
   assert approx_equal(constants.k_sol, 0.3340)
 
+def exercise_nonstandard_space_group_symbol():
+  # PDB 1M6C: 'I 1 21 1', as the CRYST1 symbol I1211 (Hall I 2yb)
+  import iotbx.pdb
+  from cctbx import sgtbx
+  cif_str = """\
+data_1M6C
+_cell.length_a           122.140
+_cell.length_b           42.300
+_cell.length_c           91.550
+_cell.angle_alpha        90.00
+_cell.angle_beta         92.49
+_cell.angle_gamma        90.00
+_symmetry.space_group_name_H-M             'I 1 21 1'
+_symmetry.Int_Tables_number                5
+loop_
+_atom_site.group_PDB
+_atom_site.id
+_atom_site.type_symbol
+_atom_site.label_atom_id
+_atom_site.label_alt_id
+_atom_site.label_comp_id
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.label_seq_id
+_atom_site.pdbx_PDB_ins_code
+_atom_site.Cartn_x
+_atom_site.Cartn_y
+_atom_site.Cartn_z
+_atom_site.occupancy
+_atom_site.B_iso_or_equiv
+_atom_site.pdbx_formal_charge
+_atom_site.auth_seq_id
+_atom_site.auth_comp_id
+_atom_site.auth_asym_id
+_atom_site.auth_atom_id
+_atom_site.pdbx_PDB_model_num
+ATOM 1 N N . GLY A 1 1 ? 10.0 11.0 12.0 1.00 20.00 ? 1 GLY A N 1
+"""
+  cs = iotbx.pdb.input(lines=cif_str, source_info=None).crystal_symmetry()
+  assert cs.space_group() == sgtbx.space_group_info("Hall: I 2yb").group()
+
 def exercise_get_r_rfree_sigma_r_work_fallback():
   def _r_work_from(cif_input):
     cif_block = iotbx.cif.reader(input_string=cif_input).model()["test"]
@@ -164,6 +205,7 @@ A CE  1
 
 def run():
   exercise_extract_f_model_core_constants()
+  exercise_nonstandard_space_group_symbol()
   exercise_get_r_rfree_sigma_r_work_fallback()
   exercise_extract_header_misc()
   exercise_rows_splitted_by_newline()
