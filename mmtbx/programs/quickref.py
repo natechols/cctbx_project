@@ -72,6 +72,33 @@ refinement
             coordinates if simultaneous=True). If False, occupancies are \
             refined in a separate step after the coordinates and ADPs in \
             each macro-cycle.
+  occupancy_states = Auto
+    .type = bool
+    .help = Multi-state ensembles (e.g. PanDDA: ground state A, B and \
+            bound state C, D in many residues, the ligand only in C, D): \
+            refine one occupancy per altloc, shared by all atoms with that \
+            altloc and constrained to sum to 1, instead of independent \
+            groups per residue. Auto: if such an ensemble is detected (each \
+            altloc with the same occupancy everywhere, see \
+            mmtbx.refinement.occupancies.ensemble_states).
+  occupancy_states_fix_d_min = 2.5
+    .type = float(value_min=0)
+    .help = Multi-state ensembles (occupancy_states): if the resolution \
+            (d_min) is lower than this, the occupancies of the states are \
+            not refined (at low resolution they are strongly correlated \
+            with the ADPs, and the bound state was refined to zero, e.g. \
+            PDB 5QDM at 2.65 A). 0: always refined.
+  identical_conformers_sigma = 0.02
+    .type = float(value_min=0)
+    .help = Multi-state ensembles (occupancy_states): conformers of a \
+            residue that are identical in the input model (e.g. copies of \
+            the ground state in the bound state) are restrained to stay \
+            identical, with this sigma (A) for the coordinates and \
+            identical_conformers_sigma_b for the B-factors (otherwise the \
+            copies drift apart and absorb the differences between the \
+            states). 0: not restrained.
+  identical_conformers_sigma_b = 1.0
+    .type = float(value_min=0)
   occupancy_min = 0
     .type = float
   occupancy_max = 1
@@ -558,12 +585,16 @@ Usage examples:
     if (p.occupancies):
       self.occupancy_groups = mmtbx.refinement.occupancies.\
         occupancy_selections(model = model)
+      self._setup_occupancy_states(model)
       if (self.occupancy_groups is not None
           and len(self.occupancy_groups) == 0):
         self.occupancy_groups = None
       if (self.occupancy_groups is None):
-        print("No alternative conformations or partial occupancies: "
-          "occupancies are not refined.", file=log)
+        if (self.occupancy_states is None):
+          print("No alternative conformations or partial occupancies: "
+            "occupancies are not refined.", file=log)
+        else:
+          print("No other occupancies to refine.", file=log)
       else:
         n_constrained = len([g for g in self.occupancy_groups if len(g) > 1])
         print("Occupancy groups: %d (%d constrained to sum to 1)" % (
@@ -607,6 +638,12 @@ Usage examples:
     print("Final: r_work=%.4f r_free=%.4f %s" % (fmodel.r_work(),
       fmodel.r_free(), self._geometry_summary(self.geometry_final)), file=log)
     self.clashscore_final = self._clashscore()
+    if (getattr(self, "occupancy_states", None) is not None):
+      occ = fmodel.xray_structure.scatterers().extract_occupancies()
+      print("Multi-state ensemble, final occupancies: %s" % " ".join([
+        "%s=%.2f" % (a, flex.mean(occ.select(sel))) for a, sel in zip(
+        self.occupancy_states.altlocs, self.occupancy_states.selections)]),
+        file=log)
     if (self.clashscore_final is not None):
       print("Clashscore: start=%.2f final=%.2f" % (self.clashscore_start,
         self.clashscore_final), file=log)
@@ -1790,11 +1827,63 @@ Usage examples:
       smooth_target            = p.smooth_target,
       riding_h                 = (self.model.riding_h_manager is not None),
       tls_groups               = tls_groups,
-      tls_refine_trace_t       = self.params.tls.joint_refine_trace_t)
+      tls_refine_trace_t       = self.params.tls.joint_refine_trace_t,
+      equal_pairs              = getattr(self, "equal_pairs", None))
     if (tls_groups is not None):
       self.model.tls_groups.tlsos = m.tls_result
       self._tls_after_joint_minimization()
     return m.minimizer.iter()
+
+  def _setup_occupancy_states(self, model):
+    """Occupancy groups of multi-state ensembles (occupancy_states)."""
+    p = self.params.refinement
+    self.occupancy_states = None
+    self.equal_pairs = None
+    if (p.occupancy_states is False): return
+    kwds = {}
+    if (p.occupancy_states is True):
+      kwds = dict(min_altlocs = 2, min_complete_residues = 1)
+    states = mmtbx.refinement.occupancies.ensemble_states(
+      hierarchy = model.get_hierarchy(), **kwds)
+    if (states is None):
+      if (p.occupancy_states is True):
+        raise Sorry("occupancy_states=True: the model is not a multi-state "
+          "ensemble (each altloc must have the same occupancy everywhere, "
+          "summing to 1 over the altlocs).")
+      return
+    self.occupancy_groups = mmtbx.refinement.occupancies.\
+      ensemble_occupancy_groups(
+        groups  = self.occupancy_groups,
+        states  = states,
+        n_atoms = model.get_number_of_atoms())
+    self.occupancy_states = states
+    print("Multi-state ensemble: one occupancy per altloc (%s), constrained "
+      "to sum to 1\n  start: %s; %d residues in all states, %d in some "
+      "(excluding waters)" % (", ".join(states.altlocs),
+      " ".join(["%s=%.2f" % (a, o) for a, o in zip(states.altlocs,
+        states.occupancies)]), states.n_complete, states.n_partial),
+      file=self.logger)
+    d_min = self.fmodel.f_obs().d_min()
+    if (p.occupancy_states_fix_d_min > 0
+        and d_min > p.occupancy_states_fix_d_min):
+      # (the group of the states is the last one)
+      self.occupancy_groups = self.occupancy_groups[:-1]
+      print("  WARNING: the occupancies of the states are not refined "
+        "(d_min=%.2f > occupancy_states_fix_d_min=%.2f)" % (d_min,
+        p.occupancy_states_fix_d_min), file=self.logger)
+    if (p.identical_conformers_sigma > 0):
+      pairs = mmtbx.refinement.occupancies.identical_conformer_pairs(
+        hierarchy = model.get_hierarchy(),
+        altlocs   = states.altlocs)
+      if (pairs.i_seqs.size() > 0):
+        self.equal_pairs = group_args(
+          i_seqs     = pairs.i_seqs,
+          j_seqs     = pairs.j_seqs,
+          sigma_site = p.identical_conformers_sigma,
+          sigma_b    = p.identical_conformers_sigma_b)
+        print("  %d conformers in %d residues are identical to another "
+          "conformer: restrained to stay identical" % (pairs.n_conformers,
+          pairs.n_residues), file=self.logger)
 
   def _refine_occupancies(self):
     p = self.params.refinement

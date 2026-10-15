@@ -8,6 +8,7 @@ from iotbx.data_manager import DataManager
 from mmtbx.programs import quickref
 from mmtbx.regression.tst_minimization_curvatures import pdb_str
 from mmtbx.regression.tst_occupancy_curvatures import alt_conf_pdb_str
+from mmtbx.regression.tst_occupancy_curvatures import ensemble_pdb_str
 from cctbx.array_family import flex
 from libtbx.utils import null_out, Sorry
 from libtbx.test_utils import approx_equal
@@ -137,6 +138,71 @@ def exercise_occupancies():
       # with coordinates and ADPs fixed the occupancies are determined;
       # otherwise ADPs partly absorb the occupancy error
       assert abs(occ_a - 0.7) < 0.05, (extra_args, occ_a)
+
+def exercise_occupancy_states():
+  # two-state ensemble: ground state A, B (0.35 each), bound state C, D
+  # (0.15 each); residue 8 only in the bound state, like a ligand.
+  # Refinement starting from 0.25 everywhere.
+  true_inp = iotbx.pdb.input(source_info=None,
+    lines=ensemble_pdb_str([0.35, 0.35, 0.15, 0.15]))
+  xrs = true_inp.xray_structure_simple()
+  f_obs = abs(xrs.structure_factors(d_min=1.5, algorithm="direct").f_calc())
+  flags = f_obs.generate_r_free_flags(fraction=0.1)
+  mtz = f_obs.as_mtz_dataset(column_root_label="F")
+  mtz.add_miller_array(flags, column_root_label="R-free-flags")
+  data_file = "tst_quickref_states_data.mtz"
+  mtz.mtz_object().write(data_file)
+  model_file = "tst_quickref_states_start.pdb"
+  with open(model_file, "w") as f:
+    f.write(ensemble_pdb_str([0.25, 0.25, 0.25, 0.25]))
+  def state_occupancies(file_name):
+    h = iotbx.pdb.input(file_name=file_name).construct_hierarchy()
+    result = {}
+    for atom in h.atoms():
+      if (atom.element.strip() == "H"): continue
+      resseq = int(atom.parent().parent().resseq)
+      altloc = atom.parent().altloc
+      result.setdefault((resseq, altloc), []).append(atom.occ)
+    return dict([(k, sum(v)/len(v)) for k, v in result.items()])
+  occupancy_only = ["refinement.sites=False", "refinement.adp=False",
+    "number_of_macro_cycles=3"]
+  # (7 residues in all states: not detected with occupancy_states=Auto)
+  for states in [True, False]:
+    r = run_quickref(model_file, data_file, "tst_quickref_states",
+      occupancy_only + ["occupancy_states=%s" % states])
+    occ = state_occupancies(r.model_file_name)
+    ligand = occ[(8, "C")] + occ[(8, "D")]
+    ground = occ[(3, "A")] + occ[(3, "B")]
+    bound = occ[(3, "C")] + occ[(3, "D")]
+    assert approx_equal(ground + bound, 1, eps=0.01)
+    if (states):
+      # one occupancy per altloc: the same in all residues
+      for resseq in range(1, 8):
+        for altloc in "ABCD":
+          assert approx_equal(occ[(resseq, altloc)], occ[(3, altloc)],
+            eps=0.001)
+      assert approx_equal(ligand, bound, eps=0.001)
+      assert abs(bound - 0.3) < 0.05, bound
+      assert r.r_work < 0.8 * r.r_work_start
+    else:
+      # independent groups per residue: the ligand at full occupancy, and
+      # R-work increases
+      assert approx_equal(ligand, 1, eps=0.01)
+      assert r.r_work > r.r_work_start
+  # at lower resolution than occupancy_states_fix_d_min (d_min=1.5): the
+  # occupancies of the states are not refined
+  r = run_quickref(model_file, data_file, "tst_quickref_states",
+    occupancy_only + ["occupancy_states=True",
+    "occupancy_states_fix_d_min=1.4"])
+  for occ in state_occupancies(r.model_file_name).values():
+    assert approx_equal(occ, 0.25, eps=0.001)
+  try:
+    run_quickref("tst_quickref_occ_start.pdb", "tst_quickref_occ_data.mtz",
+      "tst_quickref_states", ["occupancy_states=True"])
+  except Sorry as e:
+    assert "not a multi-state ensemble" in str(e)
+  else:
+    raise AssertionError("Sorry expected")
 
 def exercise_reproducibility(model_file, data_file):
   # the random numbers used for the weights are seeded (random_seed)
@@ -869,6 +935,7 @@ def run():
   exercise_hydrogens(model_file, data_file)
   exercise_weight_optimization(model_file, data_file)
   exercise_occupancies()
+  exercise_occupancy_states()
   exercise_ncs()
   exercise_reference_coordinate_restraints()
   exercise_groups()
