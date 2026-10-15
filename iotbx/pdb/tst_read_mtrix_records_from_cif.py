@@ -297,7 +297,36 @@ def exercise_ncs_loop_1_elem():
   model = mmtbx.model.manager(pdb_inp)
 
 
+def exercise_validate_rounded_matrices():
+  # rotation matrices printed with four decimals in old entries (PDB 1QLR)
+  from iotbx import mtrix_biomt
+  from scitbx import matrix
+  from libtbx.utils import Sorry
+  r = matrix.sqr((0.4815, 0.8763, 0.0152, 0.8759, -0.4806, -0.0428,
+                  -0.0302, 0.0339, -0.9990))
+  t = matrix.col((-60.117, 101.9889, 141.5782))
+  assert not r.is_r3_rotation_matrix(rms_tolerance=1e-4)
+  # copies present ('given'): not used, not checked
+  c = mtrix_biomt.container.from_lists([r], [t], ["1"], [True])
+  assert c.validate()
+  assert c.r[0] == r
+  # to be applied ('generate'): replaced by the nearest rotation matrix
+  c = mtrix_biomt.container.from_lists([r], [t], ["1"], [False])
+  assert not c.validate()
+  assert c.r[0].is_r3_rotation_matrix(rms_tolerance=1e-10)
+  assert approx_equal(c.r[0], r, eps=1.e-3)
+  # not a rotation matrix
+  bad = matrix.sqr((1, 0.1, 0, 0, 1, 0, 0, 0, 1))
+  c = mtrix_biomt.container.from_lists([bad], [t], ["1"], [False])
+  try:
+    c.validate()
+  except Sorry as e:
+    assert "not proper" in str(e)
+  else:
+    raise AssertionError("Sorry expected")
+
 if __name__ == "__main__":
   exercise()
   exercise_ncs_loop_1_elem()
+  exercise_validate_rounded_matrices()
   print("OK")

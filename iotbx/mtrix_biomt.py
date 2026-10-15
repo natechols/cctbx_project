@@ -10,6 +10,17 @@ from six import string_types
 from six.moves import range, zip
 from cctbx.array_family import flex
 
+def nearest_rotation_matrix(r):
+  """Closest proper rotation matrix (polar decomposition, Frobenius norm)."""
+  from scitbx.linalg import svd
+  m = flex.double(r)
+  m.resize(flex.grid(3, 3))
+  s = svd.real(m, accumulate_u=True, accumulate_v=True)
+  u = matrix.sqr(s.u.as_1d())
+  v = matrix.sqr(s.v.as_1d())
+  d = (u * v.transpose()).determinant()
+  return u * matrix.diag([1, 1, 1 if d > 0 else -1]) * v.transpose()
+
 class container(object):
 
   def __init__(self):
@@ -36,12 +47,28 @@ class container(object):
     self.coordinates_present.append(coordinates_present)
     self.serial_number.append(serial_number)
 
-  def validate(self, eps=1e-4):
+  def validate(self, eps=1e-4, eps_orthonormalize=1e-2):
+    """
+    Checks that the rotation matrices of the operators to be applied are
+    proper rotations. Operators whose copies are present in the model
+    (coordinates_present, e.g. _struct_ncs_oper.code 'given') are not used
+    and not checked. Matrices that are not proper within eps but within
+    eps_orthonormalize (e.g. printed with four decimals in old entries) are
+    replaced by the nearest rotation matrix, with a warning. Returns True if
+    the copies of a non-identity operator are present.
+    """
     raise_sorry = False
     for i, r in enumerate(self.r):
-      if(not r.is_r3_rotation_matrix(rms_tolerance=eps)):
-        raise_sorry = True
-        print ('  ERROR: matrix with serial number %s is not proper' % self.serial_number[i])
+      if(self.coordinates_present[i]): continue
+      if(r.is_r3_rotation_matrix(rms_tolerance=eps)): continue
+      if(r.is_r3_rotation_matrix(rms_tolerance=eps_orthonormalize)):
+        self.r[i] = nearest_rotation_matrix(r)
+        print('  WARNING: matrix with serial number %s is not proper within '
+          '%g: replaced by the nearest rotation matrix' % (
+          self.serial_number[i], eps))
+        continue
+      raise_sorry = True
+      print ('  ERROR: matrix with serial number %s is not proper' % self.serial_number[i])
     if raise_sorry:
       raise Sorry("One or more rotation matrices is not proper. See the log for details.")
     present = False
