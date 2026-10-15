@@ -112,6 +112,19 @@ weights
     .type = bool
     .help = Recompute the weights at the start of each macro-cycle \
             (otherwise once, from the input model)
+  regularize_ncycles = 0
+    .type = int(value_min=0)
+    .help = If > 0, the gradients for wxc are computed on a copy of the \
+            model regularized against the geometry restraints with this \
+            number of LBFGS iterations (after shaking the sites, see \
+            shake_sites), like the "memory eraser" of phenix.refine: \
+            the gradients of the input model reflect the previous \
+            refinement (small X-ray gradients) and its geometry errors \
+            (large geometry gradients), which both inflate wxc.
+  shake_sites = 0
+    .type = float(value_min=0)
+    .help = Mean distance (A) by which the sites of the copy are shaken \
+            before the regularization (regularize_ncycles > 0)
   optimize = False
     .type = bool
     .help = Choose wxu_scale and wxc_scale by trial refinements. The trials \
@@ -1620,15 +1633,18 @@ Usage examples:
       adp_weights_result = weights_module.weights(wx=1, wx_scale=1, w=1))
     if (self.individual_sites):
       self._set_flags(refine_sites=True, refine_adp=False)
-      g_x = self.fmodel.target_functor()(compute_gradients=True).\
+      model, fmodel = self.model, self.fmodel
+      if (p.regularize_ncycles > 0):
+        model, fmodel = self._regularized_copy()
+      g_x = fmodel.target_functor()(compute_gradients=True).\
         d_target_d_site_cart()
       # geometry restraints only: the (stiff) Cartesian NCS restraints
       # would inflate the weight
-      rm = self.model.get_restraints_manager()
+      rm = model.get_restraints_manager()
       ncs_manager = rm.cartesian_ncs_manager
       rm.cartesian_ncs_manager = None
       try:
-        g_c = self.model.restraints_manager_energies_sites(
+        g_c = model.restraints_manager_energies_sites(
           compute_gradients=True).gradients
       finally:
         rm.cartesian_ncs_manager = ncs_manager
@@ -1688,6 +1704,59 @@ Usage examples:
       result.adp_weights_result = weights_module.weights(
         wx=wxu, wx_scale=p.wxu_scale, w=1)
     return result
+
+  def _regularized_copy(self):
+    """
+    Copies of self.model and self.fmodel with the sites shaken (shake_sites)
+    and regularized against the geometry restraints (regularize_ncycles
+    LBFGS iterations), for the gradients of the weights.
+    """
+    from cctbx import geometry_restraints
+    from mmtbx.refinement import geometry_minimization
+    p = self.params.weights
+    model = self.model.deep_copy()
+    fmodel = self.fmodel.deep_copy()
+    xrs = fmodel.xray_structure
+    # hydrogen atoms are idealized after the regularization (the geometry
+    # minimizer does not support riding hydrogens with a selection)
+    selection = ~model.get_hd_selection()
+    if (self.fixed_sites_selection is not None):
+      selection &= ~self.fixed_sites_selection
+    if (p.shake_sites > 0):
+      xrs.shake_sites_in_place(mean_distance = p.shake_sites,
+        selection = selection)
+    sites_cart = xrs.sites_cart()
+    rmsd_start = self._bond_angle_rmsds(model, sites_cart)
+    geometry_minimization.lbfgs(
+      sites_cart                  = sites_cart,
+      geometry_restraints_manager = model.get_restraints_manager().geometry,
+      geometry_restraints_flags   = geometry_restraints.flags.flags(
+        default = True),
+      lbfgs_termination_params    = scitbx.lbfgs.termination_parameters(
+        max_iterations = p.regularize_ncycles),
+      correct_special_position_tolerance = 1.0,
+      sites_cart_selection        = selection,
+      lbfgs_exception_handling_params = scitbx.lbfgs.\
+        exception_handling_parameters(
+          ignore_line_search_failed_step_at_lower_bound = True,
+          ignore_line_search_failed_step_at_upper_bound = True))
+    if (model.riding_h_manager is not None):
+      model.riding_h_manager.idealize_riding_h_positions(
+        sites_cart = sites_cart)
+    xrs.set_sites_cart(sites_cart)
+    model.set_sites_cart(sites_cart)
+    fmodel.update_xray_structure(xray_structure = xrs, update_f_calc = True)
+    rmsd_final = self._bond_angle_rmsds(model, sites_cart)
+    print("  weights: copy shaken by %.2f A and regularized (%d iterations): "
+      "rmsd(bonds) %.4f -> %.4f, rmsd(angles) %.2f -> %.2f" % (
+      p.shake_sites, p.regularize_ncycles, rmsd_start[0], rmsd_final[0],
+      rmsd_start[1], rmsd_final[1]), file=self.logger)
+    return model, fmodel
+
+  def _bond_angle_rmsds(self, model, sites_cart):
+    es = model.get_restraints_manager().geometry.energies_sites(
+      sites_cart = sites_cart, compute_gradients = False)
+    return es.bond_deviations()[2], es.angle_deviations()[2]
 
   def _minimize(self, refine_sites, refine_adp, w, occupancy_groups=None):
     p = self.params.refinement
