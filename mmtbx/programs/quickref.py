@@ -509,6 +509,21 @@ Usage examples:
     self.model_input = model.get_model_input()
     if (model.crystal_symmetry() is None):
       raise Sorry("The model has no crystal symmetry.")
+    unknown = flex.bool([e.strip().upper() == "X"
+      for e in model.get_hierarchy().atoms().extract_element()])
+    if (unknown.count(True) > 0):
+      # e.g. UNX (unknown atom or ion): no scattering factor
+      model = model.select(~unknown)
+      self.data_manager.add_model(model_name, model)
+      print("WARNING: %d atoms of unknown element (X, e.g. UNX) removed." %
+        unknown.count(True), file=log)
+    negative = model.get_hierarchy().atoms().extract_occ() < 0
+    if (negative.count(True) > 0):
+      # e.g. -99 for unobserved atoms in old entries (PDB 1M6C)
+      model.set_occupancies(values = 0, selection = negative)
+      self.data_manager.add_model(model_name, model)
+      print("WARNING: %d atoms with negative occupancies: set to 0." %
+        negative.count(True), file=log)
     if (model.get_hd_selection().count(True) > 0
         and self.params.remove_hydrogens):
       model = model.select(~model.get_hd_selection())
@@ -1199,6 +1214,26 @@ Usage examples:
       raise Sorry("Hydrogens could not be added: %s" % str(error))
     result.set_log(null_out())
     result.set_stop_for_unknowns(False)
+    # hydrogens on special positions (e.g. PDB 1DJY: GLN side chain next to
+    # its symmetry copy on a 2-fold axis) are removed: restraints processing
+    # does not allow polymer atoms on special positions
+    # (with the tolerance of restraints processing)
+    from cctbx import crystal
+    sps = crystal.special_position_settings(
+      crystal_symmetry = result.crystal_symmetry(),
+      min_distance_sym_equiv = result.get_current_pdb_interpretation_params().\
+        pdb_interpretation.min_distance_sym_equiv)
+    hd_isel = result.get_hd_selection().iselection()
+    sst = sps.site_symmetry_table(
+      sites_cart = result.get_sites_cart().select(hd_isel))
+    h_special = flex.bool(result.get_number_of_atoms(), hd_isel.select(
+      sst.special_position_indices()))
+    if (h_special.count(True) > 0):
+      atoms = result.get_hierarchy().atoms()
+      print("WARNING: %d hydrogens on special positions removed:\n%s" % (
+        h_special.count(True), "\n".join(["  " + atoms[i].id_str()
+        for i in h_special.iselection()])), file=self.logger)
+      result = result.select(~h_special)
     result.process(make_restraints = True)
     print("Hydrogens added: %d" % (
       result.get_hd_selection().count(True) - n_before), file=self.logger)

@@ -204,6 +204,36 @@ def exercise_occupancy_states():
   else:
     raise AssertionError("Sorry expected")
 
+def exercise_negative_occupancies():
+  # e.g. -99 for unobserved atoms in old entries (PDB 1M6C): set to 0;
+  # atoms of unknown element (X, e.g. UNX in PDB 1SOM): removed
+  xrs = iotbx.pdb.input(source_info=None, lines=pdb_str).xray_structure_simple()
+  f_obs = abs(xrs.structure_factors(d_min=2, algorithm="direct").f_calc())
+  flags = f_obs.generate_r_free_flags(fraction=0.1)
+  mtz = f_obs.as_mtz_dataset(column_root_label="F")
+  mtz.add_miller_array(flags, column_root_label="R-free-flags")
+  data_file = "tst_quickref_negocc_data.mtz"
+  mtz.mtz_object().write(data_file)
+  lines = pdb_str.splitlines()
+  i = [k for k, l in enumerate(lines) if l.startswith("ATOM")][-1]
+  lines[i] = lines[i][:54] + "%6.2f" % -99 + lines[i][60:]
+  lines.insert(i + 1, "HETATM   68 UNK  UNX A 101      20.000  30.000  10.000"
+    "  1.00 20.00           X")
+  model_file = "tst_quickref_negocc_start.pdb"
+  with open(model_file, "w") as f:
+    f.write("\n".join(lines) + "\n")
+  r = run_quickref(model_file, data_file, "tst_quickref_negocc",
+    ["number_of_macro_cycles=1", "refinement.occupancies=False"])
+  # (with occupancy -99 the starting R-work was ~0.9)
+  assert r.r_work_start < 0.2, r.r_work_start
+  h = iotbx.pdb.input(file_name=r.model_file_name).construct_hierarchy()
+  atoms = h.atoms()
+  assert atoms.extract_occ().all_ge(0)
+  name, resseq = lines[i][12:16], int(lines[i][22:26])
+  assert [a.occ for a in atoms if a.name == name
+    and int(a.parent().parent().resseq) == resseq] == [0]
+  assert [a for a in atoms if a.parent().resname == "UNX"] == []
+
 def exercise_shake_aniso():
   from cctbx import adptbx
   xrs = iotbx.pdb.input(source_info=None, lines=pdb_str).xray_structure_simple()
@@ -955,6 +985,7 @@ def run():
   exercise_occupancies()
   exercise_occupancy_states()
   exercise_shake_aniso()
+  exercise_negative_occupancies()
   exercise_ncs()
   exercise_reference_coordinate_restraints()
   exercise_groups()
