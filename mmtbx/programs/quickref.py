@@ -1639,6 +1639,9 @@ Usage examples:
         wxc = 1.0
       else:
         wxc = g_c.norm() / g_x.norm()
+      print("  weights: wxc=%.4g (|g_geometry|=%.4g |g_xray|=%.4g) "
+        "wxc_scale=%g" % (wxc, g_c.norm(), g_x.norm(), p.wxc_scale),
+        file=self.logger)
       result.xyz_weights_result = weights_module.weights(
         wx=wxc, wx_scale=p.wxc_scale, w=1)
     if (self.individual_adp):
@@ -1680,6 +1683,8 @@ Usage examples:
         wxu = 1.0
       else:
         wxu = g_a.norm() / g_x.norm()
+      print("  weights: wxu=%.4g (|g_adp|=%.4g |g_xray|=%.4g) wxu_scale=%g" % (
+        wxu, g_a.norm(), g_x.norm(), p.wxu_scale), file=self.logger)
       result.adp_weights_result = weights_module.weights(
         wx=wxu, wx_scale=p.wxu_scale, w=1)
     return result
