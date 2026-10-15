@@ -57,6 +57,7 @@ tst_list = [
   "$D/geometry_restraints/tst_angle_derivs.py",
   "$D/geometry_restraints/tst_curvatures.py",
   "$D/geometry_restraints/tst_motif.py",
+  "$D/geometry_restraints/tst_linear_dihedrals.py",
   "$D/adp_restraints/tst_ext.py",
   "$D/adp_restraints/tst_curvatures.py",
   "$D/regression/tst_math_module.py",

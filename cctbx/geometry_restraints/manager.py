@@ -581,6 +581,39 @@ class manager(Base_geometry):
   def get_const_dihedral_proxies(self):
     return self.const_dihedral_proxies
 
+  def remove_dihedrals_through_linear_angles(self, min_angle_ideal=175):
+    """
+    Removes the dihedral restraints i-j-k-l in which the angle i-j-k or
+    j-k-l is restrained to be linear (ideal angle >= min_angle_ideal), e.g.
+    through an alkyne or nitrile group, as can be found in ligand
+    dictionaries. The dihedral is undefined for collinear atoms, and its
+    gradients diverge (~1e16 for an exactly collinear riding hydrogen).
+    Returns the removed proxies.
+    """
+    from cctbx import geometry_restraints
+    removed = geometry_restraints.shared_dihedral_proxy()
+    if (self.dihedral_proxies is None or self.angle_proxies is None):
+      return removed
+    linear = set()
+    for proxy in self.angle_proxies:
+      if (proxy.angle_ideal >= min_angle_ideal):
+        i, j, k = proxy.i_seqs
+        linear.add((j, min(i, k), max(i, k)))
+    if (len(linear) == 0):
+      return removed
+    def is_linear(i, j, k):
+      return (j, min(i, k), max(i, k)) in linear
+    kept = geometry_restraints.shared_dihedral_proxy()
+    for proxy in self.dihedral_proxies:
+      i0, i1, i2, i3 = proxy.i_seqs
+      if (is_linear(i0, i1, i2) or is_linear(i1, i2, i3)):
+        removed.append(proxy)
+      else:
+        kept.append(proxy)
+    if (removed.size() > 0):
+      self.dihedral_proxies = kept
+    return removed
+
   def get_planarity_proxies_without_user_supplied(self):
     specific_origin_id = origin_ids.get_origin_id('edits')
     if self.planarity_proxies is not None:

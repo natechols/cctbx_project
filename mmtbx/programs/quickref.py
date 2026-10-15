@@ -534,6 +534,7 @@ Usage examples:
         " (%d hydrogens without riding parameterization are fixed)" % (
         n_h - n_riding)), file=log)
       self._riding_h_adps_from_parents(model)
+    self._remove_linear_dihedrals(model)
     self._setup_fixed_sites(model)
     self._setup_anomalous(model, fmodel)
     model.set_log(log)
@@ -1105,6 +1106,23 @@ Usage examples:
       h.u_iso = u_eq[rc.a0]
     if (set_model):
       model.set_xray_structure(xrs)
+
+  def _remove_linear_dihedrals(self, model):
+    """
+    Dihedral restraints through a linear angle (e.g. an alkyne in a ligand
+    dictionary) are undefined: their gradients diverge, which blew up
+    refinements (PDB 6W0U, S0Y).
+    """
+    rm = model.get_restraints_manager()
+    if (rm is None or rm.geometry is None): return
+    removed = rm.geometry.remove_dihedrals_through_linear_angles()
+    if (removed.size() == 0): return
+    atoms = model.get_hierarchy().atoms()
+    print("Dihedral restraints through a linear angle removed: %d" %
+      removed.size(), file=self.logger)
+    for proxy in removed:
+      print("  %s" % " - ".join([atoms[i].id_str() for i in proxy.i_seqs]),
+        file=self.logger)
 
   def _setup_fixed_sites(self, model):
     """Atoms without geometry restraints (residues or atoms without restraint
