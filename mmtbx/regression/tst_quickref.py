@@ -204,6 +204,24 @@ def exercise_occupancy_states():
   else:
     raise AssertionError("Sorry expected")
 
+def exercise_shake_aniso():
+  from cctbx import adptbx
+  xrs = iotbx.pdb.input(source_info=None, lines=pdb_str).xray_structure_simple()
+  xrs.convert_to_anisotropic()
+  u_eq = xrs.extract_u_iso_or_u_equiv()
+  u_cart = xrs.scatterers().extract_u_cart(xrs.unit_cell())
+  quickref.shake_aniso_isotropically(xrs, 10)
+  u_eq_shaken = xrs.extract_u_iso_or_u_equiv()
+  du = u_eq_shaken - u_eq
+  assert flex.max(flex.abs(du)) <= adptbx.b_as_u(10) + 1.e-12
+  assert flex.max(flex.abs(du)) > adptbx.b_as_u(1)
+  for u0, u1, d in zip(u_cart, xrs.scatterers().extract_u_cart(
+      xrs.unit_cell()), du):
+    # isotropic shift, positive definite
+    assert approx_equal(u1, [u + (d if i < 3 else 0)
+      for i, u in enumerate(u0)], eps=1.e-9)
+    assert min(adptbx.eigenvalues(u1)) > 0
+
 def exercise_reproducibility(model_file, data_file):
   # the random numbers used for the weights are seeded (random_seed)
   results = []
@@ -936,6 +954,7 @@ def run():
   exercise_weight_optimization(model_file, data_file)
   exercise_occupancies()
   exercise_occupancy_states()
+  exercise_shake_aniso()
   exercise_ncs()
   exercise_reference_coordinate_restraints()
   exercise_groups()

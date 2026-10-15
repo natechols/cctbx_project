@@ -139,6 +139,13 @@ weights
     .type = bool
     .help = Recompute the weights at the start of each macro-cycle \
             (otherwise once, from the input model)
+  shake_aniso_b = 10
+    .type = float(value_min=0)
+    .help = For the ADP weight, a random isotropic component (B up to \
+            +-shake_aniso_b) is added to the anisotropic ADPs, in addition \
+            to the shaking of each component by +-10%, comparable to the \
+            shaking of isotropic ADPs (+-10 A**2). Otherwise the weight is \
+            too small for models refined anisotropically (smooth ADPs).
   regularize_ncycles = 0
     .type = int(value_min=0)
     .help = If > 0, the gradients for wxc are computed on a copy of the \
@@ -421,6 +428,20 @@ output
 '''
 
 # =============================================================================
+
+def shake_aniso_isotropically(xrs, spread_b):
+  """Adds a random isotropic component (B in [-spread_b, spread_b], limited
+  to half of the smallest eigenvalue for negative shifts) to the anisotropic
+  ADPs, comparable to the shaking of isotropic ADPs."""
+  uc = xrs.unit_cell()
+  du_max = adptbx.b_as_u(spread_b)
+  for sc in xrs.scatterers():
+    if (not sc.flags.use_u_aniso()): continue
+    u_cart = adptbx.u_star_as_u_cart(uc, sc.u_star)
+    lo = -0.5 * min(adptbx.eigenvalues(u_cart))
+    du = random.uniform(max(-du_max, lo), du_max)
+    u_cart = [u + (du if i < 3 else 0) for i, u in enumerate(u_cart)]
+    sc.u_star = adptbx.u_cart_as_u_star(uc, u_cart)
 
 class Program(ProgramTemplate):
 
@@ -1720,12 +1741,18 @@ Usage examples:
       # As in mmtbx.refinement.weights: gradients are computed after
       # shaking the ADPs (otherwise the ADP restraints gradients are small
       # for a smooth ADP distribution), using only C, N, O, S, P atoms
-      # (heavy atoms may overwhelm the gradients).
+      # (heavy atoms may overwhelm the gradients). Anisotropic ADPs are
+      # shaken too (each U* component by +-10%, and isotropically, see
+      # shake_aniso_b): models refined anisotropically have smooth ADPs,
+      # and the weight was too small (e.g. PDB 4YUH: wxu 0.001, ADPs
+      # over-restrained, R-work increased).
       model = self.model.deep_copy()
       fmodel = self.fmodel.deep_copy()
       xrs = fmodel.xray_structure
       xrs.shake_adp_if_all_equal(b_iso_tolerance = 1.e-3)
-      xrs.shake_adp(spread=10, keep_anisotropic=True)
+      xrs.shake_adp(spread=10, keep_anisotropic=False)
+      if (p.shake_aniso_b > 0):
+        shake_aniso_isotropically(xrs, p.shake_aniso_b)
       model.set_xray_structure(xrs)
       fmodel.update_xray_structure(xray_structure=xrs, update_f_calc=True)
       tr = fmodel.target_functor()(compute_gradients=True)
