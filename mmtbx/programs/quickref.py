@@ -644,9 +644,12 @@ Usage examples:
     for cycle in range(p.number_of_macro_cycles):
       if (cycle > 0):
         # bulk-solvent mask of the current model (otherwise the R-factors
-        # of the macro-cycles are optimistic: see the final R-factors)
+        # of the macro-cycles are optimistic: see the final R-factors).
+        # The update is forced: by default the mask is recomputed only if
+        # the mean shift since the last mask exceeds 0.1 A, but smaller
+        # shifts change R-free by up to 0.006 (PDB 1AS3).
         fmodel.update_xray_structure(update_f_calc = True,
-          update_f_mask = True)
+          update_f_mask = True, force_update_f_mask = True)
         # outliers are rejected only once, at the start
         fmodel.update_all_scales(remove_outliers = False)
         if (model.torsion_NCS_present()):
@@ -669,7 +672,8 @@ Usage examples:
           file=log)
         break
     # R-factors and map coefficients of the final model
-    fmodel.update_xray_structure(update_f_calc = True, update_f_mask = True)
+    fmodel.update_xray_structure(update_f_calc = True, update_f_mask = True,
+      force_update_f_mask = True)
     fmodel.update_all_scales(remove_outliers = False)
     self.geometry_final = self._geometry_rmsds()
     print("Final: r_work=%.4f r_free=%.4f %s" % (fmodel.r_work(),
@@ -808,7 +812,7 @@ Usage examples:
         model.tls_groups.tlsos = copy_tlsos(tlsos_start)
       self.fmodel = fmodel_work.deep_copy()
       self.fmodel.update_xray_structure(xray_structure = xrs,
-        update_f_calc = True, update_f_mask = True)
+        update_f_calc = True, update_f_mask = True, force_update_f_mask = True)
       try:
         for cycle in range(pw.trial_macro_cycles):
           if (cycle > 0):
@@ -855,7 +859,7 @@ Usage examples:
       if (tlsos_start is not None):
         model.tls_groups.tlsos = tlsos_start
       fmodel.update_xray_structure(xray_structure = xrs_start,
-        update_f_calc = True, update_f_mask = True)
+        update_f_calc = True, update_f_mask = True, force_update_f_mask = True)
     pw.wxc_scale, pw.wxu_scale = wxc, wxu
     print("Weight optimization: wxc_scale=%g wxu_scale=%g" % (wxc, wxu),
       file=log)
