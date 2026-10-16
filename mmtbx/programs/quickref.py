@@ -643,13 +643,12 @@ Usage examples:
     r_work_previous = fmodel.r_work()
     for cycle in range(p.number_of_macro_cycles):
       if (cycle > 0):
-        # bulk-solvent mask of the current model (otherwise the R-factors
-        # of the macro-cycles are optimistic: see the final R-factors).
-        # The update is forced: by default the mask is recomputed only if
-        # the mean shift since the last mask exceeds 0.1 A, but smaller
-        # shifts change R-free by up to 0.006 (PDB 1AS3).
-        fmodel.update_xray_structure(update_f_calc = True,
-          update_f_mask = True, force_update_f_mask = True)
+        # The bulk-solvent mask of the starting model is kept until the end:
+        # it keeps surface atoms out of the solvent region. Recomputing it
+        # in each macro-cycle lets exposed atoms drift (25-50% larger
+        # shifts) and raises R-free at low resolution (PDB 1BDJ, 2.7 A:
+        # 0.2375 -> 0.2517), at the cost of optimistic R-factors for the
+        # macro-cycles (see the final R-factors).
         # outliers are rejected only once, at the start
         fmodel.update_all_scales(remove_outliers = False)
         if (model.torsion_NCS_present()):
@@ -671,7 +670,9 @@ Usage examples:
           "macro-cycles." % (r_work_change, p.convergence_r_work, cycle+1),
           file=log)
         break
-    # R-factors and map coefficients of the final model
+    # R-factors and map coefficients of the final model. The update is
+    # forced: by default the mask is recomputed only if the mean shift since
+    # the last mask exceeds 0.1 A.
     fmodel.update_xray_structure(update_f_calc = True, update_f_mask = True,
       force_update_f_mask = True)
     fmodel.update_all_scales(remove_outliers = False)

@@ -289,6 +289,28 @@ def exercise_convergence(model_file, data_file):
   assert "Converged" not in text
   assert len(r_work) == 6, r_work
 
+def exercise_mask_kept(model_file, data_file):
+  """the bulk-solvent mask of the starting model is kept in the macro-cycles
+  and recomputed for the final R-factors"""
+  masks, programs = [], []
+  macro_cycle = quickref.Program._macro_cycle
+  def _macro_cycle(self, first, w):
+    masks.append(self.fmodel.f_masks()[0].data().deep_copy())
+    programs.append(self)
+    return macro_cycle(self, first, w)
+  quickref.Program._macro_cycle = _macro_cycle
+  try:
+    r = run_quickref(model_file, data_file, "tst_quickref_mask",
+      ["number_of_macro_cycles=3", "convergence_r_work=0",
+       "write_map_coefficients=False", "tls.enabled=False"])
+  finally:
+    quickref.Program._macro_cycle = macro_cycle
+  assert len(masks) == 3, len(masks)
+  for m in masks[1:]:
+    assert m.all_eq(masks[0])
+  assert r.r_free < r.r_free_start
+  assert not programs[-1].fmodel.f_masks()[0].data().all_eq(masks[0])
+
 def exercise_find_tls_groups(model_file, data_file):
   """tls.find_groups: TLS groups from mmtbx.command_line.find_tls_groups"""
   import io, re
@@ -976,6 +998,7 @@ def run():
   exercise_anisotropic(data_file)
   exercise_reproducibility(model_file, data_file)
   exercise_convergence(model_file, data_file)
+  exercise_mask_kept(model_file, data_file)
   exercise_find_tls_groups(model_file, data_file)
   exercise_anomalous()
   exercise(model_file, data_file)
