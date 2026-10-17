@@ -27,9 +27,11 @@ refinement
   .short_caption = Refinement
 {
   number_of_macro_cycles = 5
-    .type = int(value_min=1)
+    .type = int(value_min=0)
     .help = Maximum number of macro-cycles. Each macro-cycle updates the \
-            bulk-solvent and scale parameters, then minimizes the target.
+            bulk-solvent and scale parameters, then minimizes the target. \
+            With 0, the starting model is only evaluated (R-factors, \
+            output files).
   convergence_r_work = 0.001
     .type = float(value_min=0)
     .help = Stop when r_work changes by less than this in a macro-cycle \
@@ -135,6 +137,16 @@ weights
     .type = float(value_min=0)
     .help = Scale for the X-ray weight in ADP refinement \
             (wxu = wxu_scale * |g_adp_restraints| / |g_xray|)
+  wxc = None
+    .type = float(value_min=0)
+    .help = Absolute X-ray weight in coordinate refinement, instead of \
+            wxc_scale times the gradient ratio (e.g. the weight of a \
+            previous run: the gradient ratio of a refined model is smaller, \
+            so the same wxc_scale restrains it more tightly)
+  wxu = None
+    .type = float(value_min=0)
+    .help = Absolute X-ray weight in ADP refinement, instead of wxu_scale \
+            times the gradient ratio
   recompute_each_macro_cycle = False
     .type = bool
     .help = Recompute the weights at the start of each macro-cycle \
@@ -648,7 +660,7 @@ Usage examples:
         print("Occupancy groups: %d (%d constrained to sum to 1)" % (
           len(self.occupancy_groups), n_constrained), file=log)
     w = None
-    if (self.params.weights.optimize and
+    if (self.params.weights.optimize and p.number_of_macro_cycles > 0 and
         (self.individual_sites or self.individual_adp)):
       self._optimize_weights()
     r_work_previous = fmodel.r_work()
@@ -675,6 +687,7 @@ Usage examples:
       if ((self.individual_sites or self.individual_adp) and
           (w is None or self.params.weights.recompute_each_macro_cycle)):
         w = self._weights()
+        self.weights_used = w
       n_iter = self._macro_cycle(first = (cycle == 0), w = w)
       print("macro-cycle %d: r_work=%.4f r_free=%.4f %s iterations=%d" % (
         cycle+1, fmodel.r_work(), fmodel.r_free(), self._geometry_summary(),
@@ -1811,7 +1824,11 @@ Usage examples:
     result = group_args(
       xyz_weights_result = weights_module.weights(wx=1, wx_scale=1, w=1),
       adp_weights_result = weights_module.weights(wx=1, wx_scale=1, w=1))
-    if (self.individual_sites):
+    if (self.individual_sites and p.wxc is not None):
+      print("  weights: wxc=%.4g (given)" % p.wxc, file=self.logger)
+      result.xyz_weights_result = weights_module.weights(
+        wx=p.wxc, wx_scale=1, w=1)
+    elif (self.individual_sites):
       self._set_flags(refine_sites=True, refine_adp=False)
       model, fmodel = self.model, self.fmodel
       if (p.regularize_ncycles > 0):
@@ -1848,7 +1865,11 @@ Usage examples:
         file=self.logger)
       result.xyz_weights_result = weights_module.weights(
         wx=wxc, wx_scale=p.wxc_scale, w=1)
-    if (self.individual_adp):
+    if (self.individual_adp and p.wxu is not None):
+      print("  weights: wxu=%.4g (given)" % p.wxu, file=self.logger)
+      result.adp_weights_result = weights_module.weights(
+        wx=p.wxu, wx_scale=1, w=1)
+    elif (self.individual_adp):
       self._set_flags(refine_sites=False, refine_adp=True)
       # As in mmtbx.refinement.weights: gradients are computed after
       # shaking the ADPs (otherwise the ADP restraints gradients are small
@@ -2182,4 +2203,5 @@ Usage examples:
       fmodel          = self.fmodel,
       model_file_name = self.model_file_name,
       mtz_file_name   = self.mtz_file_name,
-      twinning        = self.twinning)
+      twinning        = self.twinning,
+      weights         = getattr(self, "weights_used", None))
