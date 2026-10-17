@@ -382,10 +382,15 @@ def find_peaks_holes(
         fmodel=fmodel,
         pdb_hierarchy=pdb_hierarchy,
         log=out)
+    coeffs = anom_map_coeffs
+    if (coeffs is None):
+      coeffs = fmodel.electron_density_map().map_coefficients(
+        map_type     = anom_map_type,
+        fill_missing = False,
+        isotropize   = False)
     anom_result = find_peaks.manager(
-      fmodel=fmodel,
-      map_type=anom_map_type,
-      map_coeffs=anom_map_coeffs,
+      map_coeffs=coeffs,
+      xray_structure=fmodel.xray_structure,
       map_cutoff=anom_map_cutoff,
       params=params,
       log=out)

@@ -125,6 +125,7 @@ general_tests = [
   "$D/regression/tst_geometry_minimization.py",
   "$D/regression/tst_minimization_curvatures.py",
   "$D/regression/tst_quickref.py",
+  "$D/regression/tst_find_peaks_holes.py",
   "$D/regression/tst_occupancy_curvatures.py",
   "$D/regression/tst_ncs_curvatures.py",
   "$D/regression/tst_reference_coordinate_curvatures.py",
