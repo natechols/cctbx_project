@@ -336,6 +336,16 @@ ncs
     include scope mmtbx.geometry_restraints.torsion_restraints.torsion_ncs.torsion_ncs_params
   }
 }
+force_field
+  .short_caption = Molecular mechanics force field
+  .help = Experimental: OpenMM force field instead of the geometry \
+          restraints of the protein and nucleic-acid residues (see \
+          mmtbx.geometry_restraints.openmm_restraints). Coordinates and ADPs \
+          are then refined in alternation, and the coordinates without \
+          curvatures.
+{
+  include scope mmtbx.geometry_restraints.openmm_restraints.master_params
+}
 bulk_solvent_map
   .short_caption = User-supplied bulk solvent
   .help = Bulk-solvent structure factors from a file (amplitudes and \
@@ -585,6 +595,7 @@ Usage examples:
     self.fmodel = fmodel
     self._setup_reference_coordinate_restraints()
     self._setup_ncs()
+    self._setup_force_field()
     self.iso_restraints = mmtbx.refinement.adp_refinement.\
       adp_restraints_master_params.extract().iso
     self._resolve_tls_enabled()
@@ -641,7 +652,14 @@ Usage examples:
         (self.individual_sites or self.individual_adp)):
       self._optimize_weights()
     r_work_previous = fmodel.r_work()
+    # implicit solvent of the force field only in the final macro-cycle
+    solvent_pending = (getattr(self, "force_field", None) is not None
+      and self.force_field.solvent_final_cycle)
+    solvent_final_cycle = False
     for cycle in range(p.number_of_macro_cycles):
+      if (solvent_pending and cycle + 1 == p.number_of_macro_cycles):
+        self._final_cycle_solvent()
+        solvent_pending = False
       if (cycle > 0):
         # The bulk-solvent mask of the starting model is kept until the end:
         # it keeps surface atoms out of the solvent region. Recomputing it
@@ -663,9 +681,20 @@ Usage examples:
         n_iter), file=log)
       r_work_change = abs(fmodel.r_work() - r_work_previous)
       r_work_previous = fmodel.r_work()
+      if (solvent_final_cycle):
+        break # (the macro-cycle with the implicit solvent is the last one)
       if (cycle + 1 >= p.min_macro_cycles
           and cycle + 1 < p.number_of_macro_cycles
           and r_work_change < p.convergence_r_work):
+        if (solvent_pending):
+          # one more macro-cycle, with the implicit solvent
+          print("Converged (r_work changed by %.4f < %g) after %d "
+            "macro-cycles: final macro-cycle with the implicit solvent." % (
+            r_work_change, p.convergence_r_work, cycle+1), file=log)
+          self._final_cycle_solvent()
+          solvent_pending = False
+          solvent_final_cycle = True
+          continue
         print("Converged (r_work changed by %.4f < %g): stopping after %d "
           "macro-cycles." % (r_work_change, p.convergence_r_work, cycle+1),
           file=log)
@@ -1699,6 +1728,36 @@ Usage examples:
       else:
         print("No torsion NCS restraints.", file=log)
 
+  def _setup_force_field(self):
+    """Force field (OpenMM) instead of the geometry restraints of the
+    macromolecule: coordinates and ADPs are refined in alternation."""
+    self.force_field = None
+    if (not self.params.force_field.enabled):
+      return
+    from mmtbx.geometry_restraints import openmm_restraints
+    log = self.logger
+    model = self.model
+    if (model.get_hd_selection().count(True) == 0):
+      raise Sorry("The force field requires hydrogens (add_hydrogens=True).")
+    self.force_field = openmm_restraints.setup(model = model,
+      params = self.params.force_field, log = log)
+    # (hydrogens moved by optimize_hydrogens)
+    self.fmodel.update_xray_structure(
+      xray_structure = model.get_xray_structure(), update_f_calc = True)
+    p = self.params.refinement
+    if (p.sites and p.adp and p.simultaneous):
+      p.simultaneous = False
+      print("  coordinates and ADPs are refined in alternation "
+        "(simultaneous=False)", file=log)
+
+  def _final_cycle_solvent(self):
+    """Implicit solvent of the force field for the final macro-cycle
+    (force_field.implicit_solvent_final_cycle)."""
+    solvent = self.params.force_field.implicit_solvent
+    self.force_field.set_solvent(solvent)
+    print("Implicit solvent (%s) switched on: E_mm=%.0f" % (solvent,
+      self._geometry_rmsds().mm_energy), file=self.logger)
+
   def _set_flags(self, refine_sites, refine_adp):
     model = self.model
     xrs = model.get_xray_structure()
@@ -1759,11 +1818,19 @@ Usage examples:
       rm = model.get_restraints_manager()
       ncs_manager = rm.cartesian_ncs_manager
       rm.cartesian_ncs_manager = None
+      # with the force field: the geometry restraints of all atoms (the
+      # force-field gradients of the input model are dominated by a few
+      # strained atoms, which inflated wxc up to 200-fold)
+      use_force_field = getattr(rm, "use_force_field", None)
+      if (use_force_field is not None):
+        rm.use_force_field = False
       try:
         g_c = model.restraints_manager_energies_sites(
           compute_gradients=True).gradients
       finally:
         rm.cartesian_ncs_manager = ncs_manager
+        if (use_force_field is not None):
+          rm.use_force_field = use_force_field
       # riding hydrogens are not parameters
       not_h = ~self.model.get_hd_selection()
       g_x, g_c = g_x.select(not_h), g_c.select(not_h)
@@ -1891,6 +1958,9 @@ Usage examples:
         tlsos      = self.model.tls_groups.tlsos)
     self.fmodel.update_xray_structure(
       xray_structure=self.model.get_xray_structure(), update_f_calc=True)
+    # (the force field has no curvatures)
+    use_curvatures = p.use_curvatures and not (refine_sites and
+      getattr(self, "force_field", None) is not None)
     m = minimization.lbfgs(
       fmodels                  = mmtbx.fmodels(fmodel_xray=self.fmodel),
       restraints_manager       = self.model.restraints_manager,
@@ -1904,7 +1974,7 @@ Usage examples:
         max_iterations = p.max_iterations),
       collect_monitor          = False,
       log                      = null_out(),
-      use_curvatures           = p.use_curvatures,
+      use_curvatures           = use_curvatures,
       curvature_floor_fraction = p.curvature_floor_fraction,
       occupancy_groups         = occupancy_groups,
       occupancy_min            = p.occupancy_min,
@@ -1996,12 +2066,16 @@ Usage examples:
     es = self.model.restraints_manager_energies_sites()
     return group_args(
       bonds  = es.geometry.bond_deviations()[2],
-      angles = es.geometry.angle_deviations()[2])
+      angles = es.geometry.angle_deviations()[2],
+      mm_energy = getattr(es, "mm_energy", None))
 
   def _geometry_summary(self, rmsds=None):
     if (rmsds is None):
       rmsds = self._geometry_rmsds()
-    return "rmsd(bonds)=%.4f rmsd(angles)=%.2f" % (rmsds.bonds, rmsds.angles)
+    result = "rmsd(bonds)=%.4f rmsd(angles)=%.2f" % (rmsds.bonds, rmsds.angles)
+    if (rmsds.mm_energy is not None):
+      result += " E_mm=%.0f" % rmsds.mm_energy
+    return result
 
   # ---------------------------------------------------------------------------
 

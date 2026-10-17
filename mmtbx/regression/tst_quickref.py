@@ -991,6 +991,83 @@ def exercise_results(model_file, data_file):
   assert r.clashscore_start is not None and r.clashscore_start >= 0
   assert r.clashscore_final is not None and r.clashscore_final >= 0
 
+def exercise_force_field(model_file, data_file):
+  """OpenMM force field instead of the geometry restraints (if OpenMM is
+  installed): refinement, gradients, alternative conformations."""
+  import io
+  try:
+    import openmm # noqa: F401
+  except ImportError:
+    print("OpenMM not installed: exercise_force_field skipped")
+    return
+  log = io.StringIO()
+  r = run_program(program_class=quickref.Program, args=[model_file,
+    data_file, "output.prefix=tst_quickref_ff", "output.overwrite=True",
+    "force_field.enabled=True", "number_of_macro_cycles=3",
+    "force_field.platform=Reference"], logger=log)
+  text = log.getvalue()
+  assert "Force field (OpenMM" in text, text
+  assert "8 residues" in text, text
+  # (C-terminus without OXT)
+  assert "templates derived" in text, text
+  assert "refined in alternation" in text, text
+  assert r.r_free < r.r_free_start, (r.r_free_start, r.r_free)
+  assert r.r_work < 0.7 * r.r_work_start, (r.r_work_start, r.r_work)
+  assert r.geometry_final.mm_energy < r.geometry_start.mm_energy
+  # gradients of the target (force field and geometry restraints) by finite
+  # differences (Reference platform: double precision)
+  model = r.model
+  rm = model.get_restraints_manager()
+  sites = model.get_sites_cart()
+  es = rm.energies_sites(sites_cart = sites, compute_gradients = True)
+  assert es.mm_energy is not None
+  h = 1.e-4
+  for i_seq in [0, 10, 30, 70, 100]:
+    for k in range(3):
+      fd = []
+      for d in [h, -h]:
+        x = sites.deep_copy()
+        v = list(x[i_seq]); v[k] += d; x[i_seq] = v
+        fd.append(rm.energies_sites(sites_cart = x).target)
+      fd = (fd[0] - fd[1]) / (2 * h)
+      g = es.gradients[i_seq][k]
+      assert abs(g - fd) < 1.e-3 * max(abs(fd), 1.e-3), (i_seq, k, g, fd)
+  # implicit solvent only in the final macro-cycle (the last one, also after
+  # convergence)
+  for n_cycles in [2, 5]:
+    log = io.StringIO()
+    r = run_program(program_class=quickref.Program, args=[model_file,
+      data_file, "output.prefix=tst_quickref_ff_gb", "output.overwrite=True",
+      "force_field.enabled=True", "force_field.implicit_solvent=gbn2",
+      "force_field.implicit_solvent_final_cycle=True",
+      "number_of_macro_cycles=%d" % n_cycles], logger=log)
+    lines = log.getvalue().splitlines()
+    i_on = [i for i, l in enumerate(lines)
+      if l.startswith("Implicit solvent (gbn2) switched on")]
+    cycles = [i for i, l in enumerate(lines) if l.startswith("macro-cycle")]
+    assert len(i_on) == 1, log.getvalue()
+    assert len([i for i in cycles if i > i_on[0]]) == 1, log.getvalue()
+    assert len(cycles) <= n_cycles
+    assert r.r_free < r.r_free_start
+  # alternative conformations: one system per altloc
+  true_inp = iotbx.pdb.input(source_info=None,
+    lines=alt_conf_pdb_str(0.7, 0.3))
+  xrs = true_inp.xray_structure_simple()
+  f_obs = abs(xrs.structure_factors(d_min=1.5, algorithm="direct").f_calc())
+  flags = f_obs.generate_r_free_flags(fraction=0.1)
+  mtz = f_obs.as_mtz_dataset(column_root_label="F")
+  mtz.add_miller_array(flags, column_root_label="R-free-flags")
+  mtz.mtz_object().write("tst_quickref_ff_alt_data.mtz")
+  with open("tst_quickref_ff_alt_start.pdb", "w") as f:
+    f.write(alt_conf_pdb_str(0.5, 0.5))
+  log = io.StringIO()
+  r = run_program(program_class=quickref.Program, args=[
+    "tst_quickref_ff_alt_start.pdb", "tst_quickref_ff_alt_data.mtz",
+    "output.prefix=tst_quickref_ff_alt", "output.overwrite=True",
+    "force_field.enabled=True", "number_of_macro_cycles=2"], logger=log)
+  assert "2 conformers (altlocs A B)" in log.getvalue(), log.getvalue()
+  assert r.r_work < r.r_work_start
+
 def run():
   random.seed(0)
   flex.set_random_seed(0)
@@ -1016,6 +1093,7 @@ def run():
   exercise_unrestrained()
   exercise_user_bulk_solvent()
   exercise_twinning_check()
+  exercise_force_field(model_file, data_file)
   print("OK")
 
 if (__name__ == "__main__"):
