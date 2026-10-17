@@ -1553,10 +1553,13 @@ Usage examples:
     finally:
       fmodel.update(target_name = target_name)
     self._sync_model()
-    if (self.model.riding_h_manager is not None):
-      self._riding_h_adps_from_parents(self.model)
-      fmodel.update_xray_structure(xray_structure =
-        self.model.get_xray_structure(), update_f_calc = True)
+    # tls_refinement makes non-positive definite ADPs positive definite
+    # (tidy_us) and then refits the TLS parameters to them, but does not
+    # apply the refitted parameters: U_tls of the atoms was then not the U_tls
+    # of the TLS parameters of the model (and of the REMARK 3 records of the
+    # output file; PDB 1D3H: |dU| up to 0.2 A**2). U_tls is set from the TLS
+    # parameters (with the riding hydrogens and fmodel).
+    self._tls_after_joint_minimization()
 
   def _tls_joint(self, first):
     """True if the TLS parameters are refined in the joint minimizer in
@@ -1616,8 +1619,10 @@ Usage examples:
           self.model.get_xray_structure(), update_f_calc = True)
 
   def _tls_after_joint_minimization(self):
-    """tls.joint=True: U_tls with the refined coordinates; non-positive
-    definite ADPs are corrected as in mmtbx.tls.tools.tls_refinement."""
+    """U_tls from the TLS parameters (after the joint minimization with
+    tls.joint=True: with the refined coordinates); non-positive definite ADPs
+    are corrected as in mmtbx.tls.tools.tls_refinement, and the TLS
+    parameters made compatible with them are applied."""
     from mmtbx.tls import tools
     model = self.model
     xrs = model.get_xray_structure()
