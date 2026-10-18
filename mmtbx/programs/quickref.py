@@ -1281,7 +1281,11 @@ Usage examples:
         h_special.count(True), "\n".join(["  " + atoms[i].id_str()
         for i in h_special.iselection()])), file=self.logger)
       result = result.select(~h_special)
-    result.process(make_restraints = True)
+    # with the default parameters: without them, process() keeps the
+    # restraints of reduce_hydrogen (made without the CDL, see
+    # get_reduce_pdb_interpretation_params)
+    result.process(make_restraints = True, pdb_interpretation_params =
+      result.get_default_pdb_interpretation_params())
     print("Hydrogens added: %d" % (
       result.get_hd_selection().count(True) - n_before), file=self.logger)
     return result
