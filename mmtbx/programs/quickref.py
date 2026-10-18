@@ -2176,11 +2176,25 @@ Usage examples:
         self.data_manager.get_default_model_name()))[0] + "_quickref"
     self.params.output.prefix = prefix
     model_out = self.model
-    if (self.model.tls_groups is not None):
-      # TLS groups and parameters (REMARK 3)
-      model_out = self.model.tls_groups_as_pdb() + self.model.model_as_pdb()
+    tls_groups = self.model.tls_groups
+    if (self.model.can_be_output_as_pdb()):
+      if (tls_groups is not None):
+        # TLS groups and parameters (REMARK 3)
+        model_out = self.model.tls_groups_as_pdb() + self.model.model_as_pdb()
+      file_name, file_format = prefix + ".pdb", "pdb"
+    else:
+      # mmCIF when the model does not fit in the PDB format (e.g. residue
+      # names with more than 3 characters, which model_as_pdb() drops)
+      additional_blocks = None
+      if (tls_groups is not None):
+        additional_blocks = [tls_groups.as_cif_block(
+          hierarchy = self.model.get_hierarchy(),
+          scattering_type = "X-RAY DIFFRACTION")]
+      model_out = self.model.model_as_mmcif(
+        additional_blocks = additional_blocks)
+      file_name, file_format = prefix + ".cif", "cif"
     self.model_file_name = self.data_manager.write_model_file(
-      model_out, filename = prefix + ".pdb", format = "pdb")
+      model_out, filename = file_name, format = file_format)
     print("\nWrote %s" % self.model_file_name, file=log)
     self.mtz_file_name = None
     if (self.params.output.write_map_coefficients):

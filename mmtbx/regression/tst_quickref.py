@@ -748,6 +748,32 @@ def exercise_input_tls():
   assert len(t) == 1
   assert approx_equal(t[0].t, tlsos[0].t, eps=0.03)
 
+def exercise_mmcif_output(model_file, data_file):
+  """A model that does not fit in the PDB format (here a 4-character chain
+  ID) is written as mmCIF, with all atoms and the TLS groups."""
+  pdb_inp = iotbx.pdb.input(file_name=model_file)
+  h = pdb_inp.construct_hierarchy()
+  for chain in h.chains():
+    chain.id = "LONG"
+  assert not h.fits_in_pdb_format()
+  model_file_cif = "tst_quickref_mmcif_start.cif"
+  with open(model_file_cif, "w") as f:
+    f.write(h.as_mmcif_string(crystal_symmetry=pdb_inp.crystal_symmetry()))
+  r = run_quickref(model_file_cif, data_file, "tst_quickref_mmcif",
+    ["number_of_macro_cycles=1", "write_map_coefficients=False",
+     "tls.enabled=True"])
+  assert r.model_file_name.endswith(".cif"), r.model_file_name
+  out_inp = iotbx.pdb.input(file_name=r.model_file_name)
+  elements = [e.strip() for e in out_inp.atoms().extract_element()]
+  assert len(elements) - elements.count("H") == 67
+  assert set(c.id for c in out_inp.construct_hierarchy().chains()) == {"LONG"}
+  with open(r.model_file_name) as f:
+    assert "_pdbx_refine_tls" in f.read()
+  # (the default model still fits: PDB format)
+  r = run_quickref(model_file, data_file, "tst_quickref_mmcif",
+    ["number_of_macro_cycles=1", "write_map_coefficients=False"])
+  assert r.model_file_name.endswith(".pdb"), r.model_file_name
+
 def exercise_groups():
   """rigid-body, group ADP and TLS refinement"""
   import io
@@ -1080,6 +1106,7 @@ def run():
   exercise_anomalous()
   exercise(model_file, data_file)
   exercise_results(model_file, data_file)
+  exercise_mmcif_output(model_file, data_file)
   exercise_hydrogens(model_file, data_file)
   exercise_weight_optimization(model_file, data_file)
   exercise_occupancies()
