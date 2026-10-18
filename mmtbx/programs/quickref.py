@@ -147,6 +147,13 @@ weights
     .type = float(value_min=0)
     .help = Absolute X-ray weight in ADP refinement, instead of wxu_scale \
             times the gradient ratio
+  geometry_gradient_clip = 10
+    .type = float(value_min=0)
+    .help = In |g_geometry| of the coordinate weight, the gradient of each \
+            atom is limited to this multiple of the median (a few strongly \
+            violated restraints, e.g. a sugar with the wrong anomer, \
+            otherwise inflate wxc and the geometry restraints become \
+            ineffective). None or 0: not limited.
   recompute_each_macro_cycle = False
     .type = bool
     .help = Recompute the weights at the start of each macro-cycle \
@@ -1860,12 +1867,23 @@ Usage examples:
       # riding hydrogens are not parameters
       not_h = ~self.model.get_hd_selection()
       g_x, g_c = g_x.select(not_h), g_c.select(not_h)
-      if (g_c.norm() == 0 or g_x.norm() == 0):
+      g_c_norm = g_c.norm()
+      clipped = ""
+      if (p.geometry_gradient_clip and g_c.size() > 0):
+        g_atom = flex.sqrt(g_c.dot())
+        g_max = p.geometry_gradient_clip * flex.median(g_atom)
+        n_clip = (g_atom > g_max).count(True)
+        if (n_clip > 0):
+          g_atom.set_selected(g_atom > g_max, g_max)
+          g_c_norm = flex.sum(g_atom * g_atom)**0.5
+          clipped = ", %d atoms limited to %g x median: %.4g" % (
+            n_clip, p.geometry_gradient_clip, g_c_norm)
+      if (g_c_norm == 0 or g_x.norm() == 0):
         wxc = 1.0
       else:
-        wxc = g_c.norm() / g_x.norm()
-      print("  weights: wxc=%.4g (|g_geometry|=%.4g |g_xray|=%.4g) "
-        "wxc_scale=%g" % (wxc, g_c.norm(), g_x.norm(), p.wxc_scale),
+        wxc = g_c_norm / g_x.norm()
+      print("  weights: wxc=%.4g (|g_geometry|=%.4g%s |g_xray|=%.4g) "
+        "wxc_scale=%g" % (wxc, g_c.norm(), clipped, g_x.norm(), p.wxc_scale),
         file=self.logger)
       result.xyz_weights_result = weights_module.weights(
         wx=wxc, wx_scale=p.wxc_scale, w=1)
